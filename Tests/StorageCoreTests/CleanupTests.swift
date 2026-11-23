@@ -103,3 +103,40 @@ private func duplicatePair(_ fixture: Fixture) async throws -> (StorageScan, kee
     #expect(CleanupTools.dockerImageTitle(["Repository": "api", "Tag": "<none>"], id: id) == "api (untagged)")
     #expect(CleanupTools.dockerImageTitle(["Repository": "api", "Tag": "latest"], id: id) == "api:latest")
 }
+
+@Test func leftoversSkipInstalledRunningAppleAndExtensionIdentifiers() {
+    let known: Set<String> = ["com.vendor.App", "com.running.Tool"]
+    #expect(CleanupInventoryBuilder.isPossibleLeftover("com.gone.Editor", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("com.vendor.App", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("com.vendor.App.Widget", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("com.running.Tool", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("com.apple.Safari", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("Google Chrome", known: known))
+    #expect(!CleanupInventoryBuilder.isPossibleLeftover("vendor.App", known: known))
+    // A shared prefix is not ownership: com.vendor.AppStore is not part of com.vendor.App.
+    #expect(CleanupInventoryBuilder.isPossibleLeftover("com.vendor.AppStore", known: known))
+    #expect(CleanupInventoryBuilder.isMacOSInstaller("com.apple.InstallAssistant.Sequoia"))
+    #expect(!CleanupInventoryBuilder.isMacOSInstaller("com.apple.Safari"))
+}
+
+@Test func localSnapshotListingOffersOnlyTimeMachineDates() {
+    let listing = """
+    Snapshots for volume group containing disk /:
+    com.apple.TimeMachine.2026-11-23-050040.local
+    com.apple.os.update-465C549A70A9C87CA3651218DF146B16
+    com.apple.TimeMachine.2026-11-23-0500.local
+    com.apple.TimeMachine.2026-11-23-05004x.local
+    """
+    #expect(CleanupTools.localSnapshotDates(listing) == ["2026-11-23-050040"])
+    #expect(!CleanupTools.validSnapshotDate("2026-11-23-050040; rm"))
+    #expect(!CleanupTools.validSnapshotDate("--all"))
+}
+
+@Test func startupItemsReadLabelProgramAndConditionalKeepAlive() throws {
+    let item = try #require(StartupItems.item(["Label": "com.vendor.agent", "ProgramArguments": ["/usr/local/bin/agent", "--run"],
+                                               "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false]],
+                                              path: "/Library/LaunchAgents/com.vendor.agent.plist", scope: .agents))
+    #expect(item.program == "/usr/local/bin/agent")
+    #expect(item.runsAtLoad && item.keepAlive && !item.disabled)
+    #expect(StartupItems.item(["Program": "/bin/true"], path: "/x.plist", scope: .user) == nil)
+}

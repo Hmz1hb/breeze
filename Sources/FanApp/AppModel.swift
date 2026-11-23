@@ -31,7 +31,12 @@ final class AppModel {
     var boostEndsAt: Date?
     var page = Page.overview
     var charge: ChargeConfiguration {
-        didSet { if let data = try? JSONEncoder().encode(charge) { preferences.set(data, forKey: "chargeConfiguration") } }
+        didSet {
+            // Top up is a one-time request; never restart it on the next launch.
+            var saved = charge
+            saved.topUp = nil
+            if let data = try? JSONEncoder().encode(saved) { preferences.set(data, forKey: "chargeConfiguration") }
+        }
     }
     var chargeStatus: String?
     var chargingPaused = false
@@ -56,6 +61,7 @@ final class AppModel {
     var widgetObservers = 0
     let widgetActivity = ActivityModel()
     let widgetStorage = StorageMonitor()
+    let menuBarReadings = MenuBarReadings()
     let storage = StorageModel()
     let network = NetworkModel()
     let activity = ActivityModel()
@@ -70,6 +76,7 @@ final class AppModel {
     private var loop: Task<Void, Never>?
     private var widgetLoop: Task<Void, Never>?
     private var widgetStorageLoop: Task<Void, Never>?
+    private var menuBarReadingsLoop: Task<Void, Never>?
     private var devicesLoop: Task<Void, Never>?
     private var appTrafficLoop: Task<Void, Never>?
     private var ticks = 0
@@ -177,11 +184,21 @@ final class AppModel {
     func start() {
         guard loop == nil else { return }
         activity.connectHelper = { [weak self] in Task { await self?.enable() } }
+        Task { [macInfo] in await macInfo.refresh() }
         widgetStorageLoop = Task { [weak self, widgetStorage] in
             await widgetStorage.run(when: { [weak self] in
                 guard let self, !self.sleeping else { return false }
                 return self.widgetPreferences.needsStorageInMenuBar ||
                     (self.widgetObservers > 0 && self.widgetPreferences.needsStorageInPopover)
+            })
+        }
+        menuBarReadingsLoop = Task { [weak self, menuBarReadings] in
+            await menuBarReadings.run(network: { [weak self] in
+                guard let self, !self.sleeping else { return false }
+                return self.widgetPreferences.needsNetworkInMenuBar
+            }, battery: { [weak self] in
+                guard let self, !self.sleeping else { return false }
+                return self.widgetPreferences.needsBatteryInMenuBar
             })
         }
         widgetLoop = Task { [weak self, widgetActivity] in
@@ -262,6 +279,12 @@ final class AppModel {
         // Each new helper session starts with charging under macOS control.
         if charge.isActive { consume(try await session.request(Command(.charge, charge: charge))) }
     }
+    /// Charge to 100% once, then return to the limit when unplugged.
+    func topUp(_ on: Bool) async {
+        charge.topUp = on ? true : nil
+        if on { charge.discharge = nil }
+        await applyCharge()
+    }
     /// Starts, updates or stops the helper's charge limiter. Connecting is needed only to turn it on.
     func applyCharge() async {
         guard !busy else { return }
@@ -338,6 +361,8 @@ final class AppModel {
     private func consume(_ reply: Reply) {
         chargeStatus = reply.charging
         chargingPaused = reply.chargingPaused ?? false
+        // The helper ends a top up once the adapter is unplugged.
+        if charge.topUp == true, reply.toppingUp == false { charge.topUp = nil }
         if let power = reply.power { activity.helperPower = (power, Date()) }
         manual = reply.manual
         appliedPercent = reply.percent
@@ -416,6 +441,7 @@ final class AppModel {
         loop?.cancel()
         widgetLoop?.cancel()
         widgetStorageLoop?.cancel()
+        menuBarReadingsLoop?.cancel()
         devicesLoop?.cancel()
         appTrafficLoop?.cancel()
         await disable()

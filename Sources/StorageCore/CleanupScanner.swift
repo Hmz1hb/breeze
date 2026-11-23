@@ -56,6 +56,10 @@ public enum CleanupScanner {
         let docker = try await CleanupTools.docker()
         builder.entries += docker.entries
         builder.issues += docker.issues
+        await progress("Checking Time Machine local snapshots")
+        let snapshots = try await CleanupTools.localSnapshots()
+        builder.entries += snapshots.entries
+        builder.issues += snapshots.issues
         try Task.checkCancellation()
         return CleanupInventory(entries: builder.entries.sorted {
             $0.bytes == $1.bytes ? $0.id < $1.id : $0.bytes > $1.bytes
@@ -167,6 +171,13 @@ final class CleanupInventoryBuilder {
                 apps.append(CleanupApp(id: id, name: name, url: url, lastUsed: lastUsed))
                 // An app cannot remove itself or its own data while it is running.
                 if id == Bundle.main.bundleIdentifier { continue }
+                if Self.isMacOSInstaller(id) {
+                    append(title: name, urls: [url], category: .applications, risk: .review,
+                           detail: "macOS installer app. It is only needed to install or reinstall this macOS version and is often left behind after an upgrade.",
+                           recovery: "Download the installer again from the App Store or with softwareupdate --fetch-full-installer.",
+                           ownerID: id, ownerName: name, lastUsed: lastUsed)
+                    continue
+                }
                 append(title: name, urls: [url], category: .applications, risk: .personal,
                        detail: "Application bundle. Related files appear separately under this app and are never selected automatically. Removing the bundle does not revoke subscriptions or uninstall privileged helpers.",
                        recovery: "Restore from Trash or reinstall the app. Keep a backup of important app data.",
@@ -176,8 +187,19 @@ final class CleanupInventoryBuilder {
         for root in roots { try walk(root, depth: 0) }
     }
 
+    static func isMacOSInstaller(_ id: String) -> Bool { id.hasPrefix("com.apple.InstallAssistant.") }
+
+    /// A bundle-identifier-shaped name that no installed, running or Apple app
+    /// claims. Extensions and helpers (`com.vendor.App.Widget`) belong to `com.vendor.App`.
+    static func isPossibleLeftover(_ id: String, known: Set<String>) -> Bool {
+        guard id.split(separator: ".").count >= 3, !id.contains(" "), !id.hasPrefix("com.apple."),
+              id != Bundle.main.bundleIdentifier else { return false }
+        return !known.contains { id == $0 || id.hasPrefix($0 + ".") }
+    }
+
     func findAppData() throws {
         let byID = Dictionary(apps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let known = Set(byID.keys).union(running)
         for base in ["Library/Caches", "Library/Logs", "Library/Saved Application State", "Library/Preferences"] {
             let root = CleanupFiles.home.appendingPathComponent(base)
             let urls: [URL]
@@ -191,17 +213,34 @@ final class CleanupInventoryBuilder {
                 let app = byID[id]
                 // Tool caches have their own rules. Unknown entries are only offered
                 // as possible leftovers when their name looks like a bundle identifier.
-                guard app != nil || (id.split(separator: ".").count >= 3 && !id.contains(" ")) else { continue }
+                guard app != nil || Self.isPossibleLeftover(id, known: known) else { continue }
                 let isCache = base.hasSuffix("Caches")
                 let isLog = base.hasSuffix("Logs")
                 let category: CleanupCategory = app == nil ? .leftovers : (isCache || isLog ? .appCaches : .applications)
                 append(title: "\(app?.name ?? id) · \(isCache ? "cache" : isLog ? "logs" : base.hasSuffix("State") ? "saved state" : "preferences")",
                        urls: [url], category: category, risk: isCache ? .review : .personal,
-                       detail: app == nil ? "Possible leftover: no matching app was found in /Applications or ~/Applications. It may still belong to a tool or an app installed elsewhere. Inspect it before removing."
+                       detail: app == nil ? Self.leftoverDetail
                            : isCache ? "Cache belonging to \(app?.name ?? id). Check for offline downloads or other data the app cannot recreate."
                            : "App settings, logs or saved window state. These may contain data you want to keep.",
                        recovery: isCache ? "The app may recreate its cache. Offline data may need downloading again." : "Restore from Trash to recover these settings or records.",
                        ownerID: id, ownerName: app?.name ?? id)
+            }
+        }
+        // Support data of apps that are no longer installed. Data of installed apps
+        // is matched by exact identifier below.
+        for base in ["Library/Application Support", "Library/Containers", "Library/Application Scripts",
+                     "Library/HTTPStorages", "Library/WebKit"] {
+            let root = CleanupFiles.home.appendingPathComponent(base)
+            let urls: [URL]
+            do { urls = try children(root) }
+            catch { recordIssue(error, location: root.path); continue }
+            for url in urls where Self.isPossibleLeftover(url.lastPathComponent, known: known) {
+                try Task.checkCancellation()
+                let id = url.lastPathComponent
+                append(title: "\(id) · \(base.components(separatedBy: "/").last ?? "data")",
+                       urls: [url], category: .leftovers, risk: .personal, detail: Self.leftoverDetail,
+                       recovery: "Restore from Trash or a backup. Reinstalling the app does not restore this data.",
+                       ownerID: id, ownerName: id)
             }
         }
         for app in apps where app.id != Bundle.main.bundleIdentifier {
@@ -244,6 +283,8 @@ final class CleanupInventoryBuilder {
             }
         }
     }
+
+    static let leftoverDetail = "Possible leftover: no installed or running app uses this bundle identifier. It may still belong to a tool or an app installed outside /Applications and ~/Applications. Inspect it before removing."
 
     /// Path inside the scanned folder, so a generic module like `app` still shows its project.
     static func projectLabel(_ directory: URL, root: URL) -> String {

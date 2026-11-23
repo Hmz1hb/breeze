@@ -3,7 +3,7 @@ import Charts
 import NetworkCore
 import SwiftUI
 
-private let networkMint = Color(red: 0.22, green: 0.67, blue: 0.55)
+private let networkMint = BreezeStyle.mint
 private let networkSlate = Color(red: 0.40, green: 0.53, blue: 0.82)
 
 private func networkBytes(_ bytes: UInt64?) -> String {
@@ -31,6 +31,9 @@ private func networkMS(_ ms: Double?) -> String {
 // Spacing: four-point grid, 20-point panels and 28-point outer gutters.
 struct NetworkView: View {
     @Bindable var model: NetworkModel
+    @State private var scrolled = false
+    @State private var trafficScrub: Date?
+    @Environment(\.breezeMotionLevel) private var level
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,18 +41,11 @@ struct NetworkView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     route
-                    if model.tab == .apps {
-                        appInventory
-                    } else if model.tab == .activity {
-                        speedTest
-                        traffic
-                        health
-                        HStack(alignment: .top, spacing: 16) {
-                            interface.frame(maxWidth: .infinity)
-                            addresses.frame(maxWidth: .infinity)
-                        }
-                    } else { deviceInventory }
-                }.padding(.horizontal, 28).padding(.bottom, 28)
+                    BreezeSwitcher(model.tab, index: NetworkModel.Tab.allCases.firstIndex(of: model.tab) ?? 0) {
+                        tabContent.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }.padding(.horizontal, BreezeStyle.pagePadding).padding(.bottom, BreezeStyle.pagePadding)
+                    .breezeScrollEdge($scrolled)
             }
             Divider()
             HStack(spacing: 8) {
@@ -59,23 +55,34 @@ struct NetworkView: View {
                 Spacer(minLength: 8)
                 Toggle("Internet checks", isOn: $model.internetChecks).toggleStyle(.switch).controlSize(.mini)
                     .font(.caption2).help("TCP probes to Cloudflare every 5 seconds and a public IPv4/country lookup every minute while this page is open.")
-            }.padding(.horizontal, 28).frame(height: 44)
+            }.padding(.horizontal, BreezeStyle.pagePadding).frame(height: 44)
         }.task { await model.run() }
             .onDisappear { model.stopScanning(); model.stopSpeedTest() }
             .sheet(item: $model.inspected) { device in NetworkDeviceDetail(model: model, device: device) }
     }
 
-    private var header: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Network").font(.system(size: 28, weight: .semibold, design: .rounded))
-                Text("Your connection, and the devices around it.").font(.subheadline).foregroundStyle(.secondary)
+    @ViewBuilder private var tabContent: some View {
+        if model.tab == .apps {
+            appInventory
+        } else if model.tab == .activity {
+            VStack(alignment: .leading, spacing: 20) {
+                speedTest
+                traffic
+                health
+                HStack(alignment: .top, spacing: 16) {
+                    interface.frame(maxWidth: .infinity)
+                    addresses.frame(maxWidth: .infinity)
+                }
             }
-            Spacer()
+        } else { deviceInventory }
+    }
+
+    private var header: some View {
+        BreezePageHeader("Network", subtitle: "Your connection, and the devices around it.", scrolled: scrolled) {
             Picker("Network view", selection: $model.tab) {
                 ForEach(NetworkModel.Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
-        }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 24)
+        }
     }
 
     private var route: some View {
@@ -88,16 +95,13 @@ struct NetworkView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
-            HStack(spacing: 8) {
-                Image(systemName: "laptopcomputer")
-                Image(systemName: "chevron.right").font(.system(size: 8))
-                Image(systemName: "wifi.router")
-                Image(systemName: "chevron.right").font(.system(size: 8))
-                Image(systemName: "globe")
-            }.foregroundStyle(.tertiary).font(.system(size: 15)).accessibilityHidden(true)
+            NetworkRouteDiagram(download: model.traffic.last?.download ?? 0, upload: model.traffic.last?.upload ?? 0,
+                                broken: internetBroken)
             VStack(alignment: .trailing, spacing: 6) {
                 HStack(spacing: 6) {
                     Circle().fill(statusColor).frame(width: 6, height: 6)
+                        .breezePulse(trigger: healthState, tint: statusColor)
+                        .breezeAnimation(.settle, value: healthState)
                     Text(model.status).font(.caption.weight(.medium))
                 }
                 Text(model.connection.gateway.map { "Gateway \($0)" } ?? "No gateway reported")
@@ -105,24 +109,37 @@ struct NetworkView: View {
             }
         }.padding(20).networkPanel()
     }
+    private var internetBroken: Bool { model.internetChecks && model.connectivity.last?.reachable == false }
     private var statusColor: Color {
         if !model.connection.isUp { return model.loading ? .secondary : .orange }
-        return model.internetChecks && model.connectivity.last?.reachable == false ? .orange : networkMint
+        return internetBroken ? .orange : networkMint
     }
+    /// Changes only when the status colour's meaning changes, so the dot pulses once per reachability change.
+    private var healthState: Int { !model.connection.isUp ? (model.loading ? 0 : 1) : internetBroken ? 1 : 2 }
 
     private var speedTest: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Label("Internet speed test", systemImage: "speedometer").font(.subheadline.weight(.semibold))
+                Label {
+                    Text("Internet speed test")
+                } icon: {
+                    Image(systemName: "speedometer")
+                        .symbolEffect(.variableColor.iterative, isActive: model.testingSpeed && level.isActive)
+                }.font(.subheadline.weight(.semibold))
                 Spacer()
-                if model.testingSpeed {
-                    ProgressView().controlSize(.small)
-                    Button("Cancel") { model.stopSpeedTest() }
-                } else {
-                    Button(model.speedResult == nil ? "Start test" : "Test again", systemImage: "play.fill") { model.startSpeedTest() }
-                        .breezeAction(prominent: true)
-                        .disabled(!model.connection.isUp || !model.internetChecks)
-                }
+                ZStack(alignment: .trailing) {
+                    if model.testingSpeed {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Button("Cancel") { model.stopSpeedTest() }
+                        }.transition(.breezeFade)
+                    } else {
+                        Button(model.speedResult == nil ? "Start test" : "Test again", systemImage: "play.fill") { model.startSpeedTest() }
+                            .breezeAction(prominent: true)
+                            .disabled(!model.connection.isUp || !model.internetChecks)
+                            .transition(.breezeFade)
+                    }
+                }.breezeAnimation(.settle, value: model.testingSpeed)
             }
             HStack(spacing: 32) {
                 speedMeasurement("Download", symbol: "arrow.down", value: model.speedResult?.downloadMbps, color: networkMint)
@@ -130,12 +147,16 @@ struct NetworkView: View {
                 Spacer(minLength: 0)
                 measurement("Idle latency", value: networkMS(model.speedResult?.idleLatency))
             }
-            Text(!model.internetChecks ? "Enable Internet checks to run a speed test." : !model.connection.isUp ? "Connect to the internet to start a test." : model.speedMessage)
+            let caption = !model.internetChecks ? "Enable Internet checks to run a speed test." : !model.connection.isUp ? "Connect to the internet to start a test." : model.speedMessage
+            Text(caption)
                 .font(.caption).foregroundStyle(.secondary).accessibilityAddTraits(.updatesFrequently)
-            if let error = model.speedError {
-                Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                .contentTransition(.opacity).breezeAnimation(.settle, value: caption)
+            Group {
+                if let error = model.speedError {
+                    Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true).transition(.breezeDrop)
+                }
+            }.breezeAnimation(.settle, value: model.speedError)
             Text("Uses Apple’s network quality test. Download and upload are measured together. Tests use significant internet data and can briefly slow other activity.")
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }.padding(20).networkPanel()
@@ -145,8 +166,14 @@ struct NetworkView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: symbol).font(.caption.weight(.medium)).foregroundStyle(color)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(value.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "—")
-                    .font(.system(size: 29, weight: .light, design: .rounded)).monospacedDigit()
+                Group {
+                    if let value {
+                        // New identity per completed test; the key keeps a revisit of the page from replaying it.
+                        let result = model.speedResult?.date.timeIntervalSince1970 ?? 0
+                        BreezeCountUp(value, key: "network.speed.\(result)") { $0.formatted(.number.precision(.fractionLength(1))) }
+                            .id(model.speedResult?.date)
+                    } else { Text("—") }
+                }.font(.system(size: 29, weight: .light, design: .rounded)).monospacedDigit()
                 Text("Mbps").font(.caption).foregroundStyle(.secondary)
             }
         }.frame(minWidth: 150, alignment: .leading)
@@ -170,39 +197,65 @@ struct NetworkView: View {
                     Text("Since interface reset").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
-            if model.samples.count >= 2 {
-                Chart(model.samples) { point in
-                    LineMark(x: .value("Time", point.date), y: .value("Bytes/s", point.download), series: .value("Direction", "Download"))
-                        .foregroundStyle(networkMint).lineStyle(StrokeStyle(lineWidth: 1.8))
-                    LineMark(x: .value("Time", point.date), y: .value("Bytes/s", point.upload), series: .value("Direction", "Upload"))
-                        .foregroundStyle(networkSlate).lineStyle(StrokeStyle(lineWidth: 1.5))
-                }.chartYScale(domain: 0...max(1024, model.samples.map { max($0.download, $0.upload) }.max() ?? 1024))
-                    .chartXScale(domain: Date.now.addingTimeInterval(-Double(model.windowSeconds))...Date.now)
-                    .chartYAxis {
-                        AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                            AxisGridLine().foregroundStyle(.primary.opacity(0.05))
-                            AxisValueLabel { if let bytes = value.as(Double.self) { Text(networkRate(bytes)).font(.system(size: 9)).foregroundStyle(.secondary) } }
-                        }
-                    }.chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisValueLabel(format: .dateTime.hour().minute().second()) } }
-                    .frame(height: 128)
-                    .accessibilityLabel("Live download and upload traffic, in bytes per second")
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "waveform.path").font(.title2).foregroundStyle(.tertiary)
-                    Text(model.connection.isUp ? "Collecting live traffic…" : "Connect to a network to see traffic")
-                        .font(.caption).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity).frame(height: 128)
-            }
+            let samples = model.samples
+            Group {
+                if samples.count >= 2 { trafficChart(samples) } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "waveform.path").font(.title2).foregroundStyle(.tertiary)
+                        Text(model.connection.isUp ? "Collecting live traffic…" : "Connect to a network to see traffic")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity).frame(height: 128).transition(.breezeFade)
+                }
+            }.breezeAnimation(.settle, value: samples.count >= 2)
             Text("All traffic on \(model.connection.interface.isEmpty ? "the active interface" : model.connection.interface), including local transfers. Use the internet speed test above to measure your connection’s capacity.")
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }.padding(20).networkPanel()
     }
 
+    private func trafficChart(_ samples: [NetworkTraffic]) -> some View {
+        // The domain ends at the newest sample, so hovering never slides it between samples.
+        let end = samples.last?.date ?? .now
+        let selected = trafficScrub.flatMap { BreezeMotion.nearest(samples, to: $0, by: \.date) }
+        return Chart {
+            ForEach(samples) { point in
+                LineMark(x: .value("Time", point.date), y: .value("Bytes/s", point.download), series: .value("Direction", "Download"))
+                    .foregroundStyle(networkMint).lineStyle(StrokeStyle(lineWidth: 1.8)).interpolationMethod(.monotone)
+                LineMark(x: .value("Time", point.date), y: .value("Bytes/s", point.upload), series: .value("Direction", "Upload"))
+                    .foregroundStyle(networkSlate).lineStyle(StrokeStyle(lineWidth: 1.5)).interpolationMethod(.monotone)
+            }
+            if let selected {
+                RuleMark(x: .value("Time", selected.date)).foregroundStyle(.primary.opacity(0.25)).lineStyle(StrokeStyle(lineWidth: 1))
+                    .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        BreezeChartCallout(title: selected.date.formatted(date: .omitted, time: .standard),
+                                           value: "↓ \(networkRate(selected.download))  ↑ \(networkRate(selected.upload))")
+                    }
+                PointMark(x: .value("Time", selected.date), y: .value("Bytes/s", selected.download))
+                    .foregroundStyle(networkMint).symbolSize(48)
+                PointMark(x: .value("Time", selected.date), y: .value("Bytes/s", selected.upload))
+                    .foregroundStyle(networkSlate).symbolSize(48)
+            }
+        }.chartYScale(domain: 0...max(1024, samples.map { max($0.download, $0.upload) }.max() ?? 1024))
+            .chartXScale(domain: end.addingTimeInterval(-Double(model.windowSeconds))...end)
+            .chartPlotStyle { $0.breezeChartDrawIn(key: "network.traffic") }
+            .breezeAnimation(.settle, value: model.windowSeconds)
+            .chartYAxis {
+                        AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+                            AxisGridLine().foregroundStyle(.primary.opacity(0.05))
+                            AxisValueLabel { if let bytes = value.as(Double.self) { Text(networkRate(bytes)).font(.system(size: 9)).foregroundStyle(.secondary) } }
+                        }
+                    }.chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisValueLabel(format: .dateTime.hour().minute().second()) } }
+                    .breezeChartScrub($trafficScrub)
+                    .breezeChartKeys($trafficScrub, dates: samples.map(\.date))
+                    .frame(height: 128)
+                    .accessibilityLabel("Live download and upload traffic, in bytes per second")
+                    .transition(.breezeFade)
+    }
+
     private func rate(_ title: String, symbol: String, value: Double?, total: UInt64?, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: symbol).font(.caption.weight(.medium)).foregroundStyle(color)
-            Text(networkRate(value)).font(.system(size: 29, weight: .light, design: .rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text("\(networkBytes(total)) transferred").font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            Text(networkRate(value)).font(.system(size: 29, weight: .light, design: .rounded)).breezeLive().lineLimit(1).minimumScaleFactor(0.7)
+            Text("\(networkBytes(total)) transferred").font(.caption2).foregroundStyle(.secondary).breezeLive()
         }.frame(minWidth: 150, alignment: .leading)
     }
 
@@ -220,21 +273,11 @@ struct NetworkView: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
                     Text(model.connectivity.isEmpty ? "—" : "\(Int(Double(model.connectivity.filter(\.reachable).count) / Double(model.connectivity.count) * 100))%")
-                        .font(.system(size: 23, weight: .light, design: .rounded)).monospacedDigit()
+                        .font(.system(size: 23, weight: .light, design: .rounded)).breezeLive()
                     Text("Successful probes").font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            GeometryReader { geometry in
-                HStack(spacing: 2) {
-                    ForEach(0..<120, id: \.self) { index in
-                        let sample = index < model.connectivity.count ? model.connectivity[index] : nil
-                        RoundedRectangle(cornerRadius: 2).fill(sample.map { $0.reachable ? networkMint.opacity(0.8) : Color.orange.opacity(0.8) } ?? Color.primary.opacity(0.06))
-                            .frame(width: max(1, (geometry.size.width - 238) / 120))
-                            .help(sample.map { "\($0.date.formatted(date: .omitted, time: .standard)) · \($0.reachable ? networkMS($0.milliseconds) : "Probe failed")" } ?? "No sample yet")
-                    }
-                }
-            }.frame(height: 18).accessibilityElement(children: .ignore)
-                .accessibilityLabel("Connectivity history, \(model.connectivity.count) probes collected")
+            NetworkConnectivityStrip(samples: model.connectivity)
             HStack {
                 Label("Reachable", systemImage: "circle.fill").foregroundStyle(networkMint)
                 Label("Probe failed", systemImage: "circle.fill").foregroundStyle(.orange)
@@ -247,7 +290,7 @@ struct NetworkView: View {
     }
     private func measurement(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(value).font(.system(size: 23, weight: .light, design: .rounded)).monospacedDigit()
+            Text(value).font(.system(size: 23, weight: .light, design: .rounded)).breezeLive()
             Text(title).font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -320,11 +363,11 @@ struct NetworkView: View {
                 Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
             }
             let rows = Array(model.sortedAppUsage.prefix(40))
-            if rows.isEmpty {
+            Group { if rows.isEmpty {
                 VStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
+                    BreezeDelayedProgress().controlSize(.small)
                     Text("Waiting for network activity…").font(.caption).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity).padding(.vertical, 48).networkPanel()
+                }.frame(maxWidth: .infinity).padding(.vertical, 48).networkPanel().transition(.breezeFade)
             } else {
                 LazyVStack(spacing: 0) {
                     HStack {
@@ -334,8 +377,8 @@ struct NetworkView: View {
                         Text("Total").frame(width: 92, alignment: .trailing)
                     }.font(.caption2.weight(.medium)).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 10)
                     ForEach(rows) { usage in appRow(usage) }
-                }.networkPanel()
-            }
+                }.networkPanel().transition(.breezeFade)
+            } }.breezeAnimation(.settle, value: rows.isEmpty)
             Text("Includes local and loopback traffic. Processes are listed by name and PID; helper processes appear separately from their app. Totals count every connection since Breeze opened, including ones that have already closed, and are not saved. Traffic from before Breeze opened is not included.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -343,8 +386,8 @@ struct NetworkView: View {
     /// Live rate over the session total for one direction, so finished transfers stay visible.
     private func directionCell(rate: Double, total: UInt64, color: Color) -> some View {
         VStack(alignment: .trailing, spacing: 2) {
-            Text(networkRate(rate)).foregroundStyle(rate > 0 ? color : .secondary)
-            Text(networkBytes(total)).font(.caption2).foregroundStyle(.secondary)
+            Text(networkRate(rate)).foregroundStyle(rate > 0 ? color : .secondary).breezeLive()
+            Text(networkBytes(total)).font(.caption2).foregroundStyle(.secondary).breezeLive()
         }.frame(width: 92, alignment: .trailing)
     }
     private func appRow(_ usage: AppNetworkUsage) -> some View {
@@ -361,7 +404,7 @@ struct NetworkView: View {
             Spacer(minLength: 8)
             directionCell(rate: usage.download, total: usage.received, color: networkMint)
             directionCell(rate: usage.upload, total: usage.sent, color: networkSlate)
-            Text(networkBytes(usage.received + usage.sent)).frame(width: 92, alignment: .trailing)
+            Text(networkBytes(usage.received + usage.sent)).breezeLive().frame(width: 92, alignment: .trailing)
         }.font(.system(size: 12)).monospacedDigit().padding(.horizontal, 16).padding(.vertical, 8)
             .overlay(alignment: .bottom) { Divider().opacity(0.4).padding(.leading, 50) }
             .accessibilityElement(children: .combine)
@@ -383,7 +426,9 @@ struct NetworkView: View {
                         .breezeAction(prominent: true).disabled(model.subnet == nil || !model.connection.isUp)
                 }
             }
-            if model.scanning { ProgressView(value: model.scanProgress).tint(networkMint) }
+            Group {
+                if model.scanning { BreezeMeter(fraction: model.scanProgress, tint: networkMint).transition(.breezeFade) }
+            }.breezeAnimation(.settle, value: model.scanning)
             if let error = model.discoveryError {
                 HStack(alignment: .top) {
                     Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
@@ -392,17 +437,19 @@ struct NetworkView: View {
                         .controlSize(.small)
                 }
             }
-            if model.subnet == nil {
+            Group { if model.subnet == nil {
                 ContentUnavailableView("No supported local IPv4 network", systemImage: "network.slash",
                     description: Text("Connect to a private Wi-Fi or Ethernet network to discover devices. Public-address, IPv6-only and VPN interfaces are not swept."))
+                    .transition(.breezeFade)
             } else if model.devices.isEmpty {
                 VStack(spacing: 16) {
                     Image(systemName: "wifi.router").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(networkMint)
+                        .symbolEffect(.variableColor.iterative, isActive: model.scanning && level.isActive)
                     Text("Get to know your network").font(.title3.weight(.medium))
                     Text("Find nearby computers, phones, printers and media devices.\nBreeze checks local addresses and listens for advertised names.")
                         .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
                     Text("macOS will ask for Local Network access on your first scan.").font(.caption).foregroundStyle(.tertiary)
-                }.frame(maxWidth: .infinity).padding(.vertical, 64).networkPanel()
+                }.frame(maxWidth: .infinity).padding(.vertical, 64).networkPanel().transition(.breezeFade)
             } else {
                 HStack {
                     TextField("Search name, address or device type", text: $model.search).textFieldStyle(.roundedBorder).frame(maxWidth: 300)
@@ -410,10 +457,10 @@ struct NetworkView: View {
                     Text("\(model.filteredDevices.count) devices").font(.caption).foregroundStyle(.secondary)
                 }
                 LazyVStack(spacing: 0) {
-                    ForEach(model.filteredDevices) { device in deviceRow(device) }
+                    ForEach(model.filteredDevices) { device in deviceRow(device).transition(.breezeDrop) }
                     if model.filteredDevices.isEmpty { Text("No devices match your search.").font(.subheadline).foregroundStyle(.secondary).padding(32) }
-                }.networkPanel()
-            }
+                }.networkPanel().breezeAnimation(.settle, value: model.devices.count).transition(.breezeFade)
+            } }.breezeAnimation(.settle, value: model.subnet == nil ? 0 : model.devices.isEmpty ? 1 : 2)
             Text("Names and models come from device advertisements; types are inferred from services. A neighbor record alone does not confirm that a device is online. Sleeping devices and isolated Wi-Fi clients may be missed. Private MAC addresses limit identification. If an iPhone stays unidentified, unlock it and scan again; iOS may not advertise a name or model. You can also give it a name in device details.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if model.subnet?.isLimited == true {
@@ -438,9 +485,9 @@ struct NetworkView: View {
                 }
                 Text(device.responded ? "Responded" : "Neighbor record").font(.system(size: 10, weight: .medium))
                     .foregroundStyle(device.responded ? networkMint : .secondary).frame(width: 90, alignment: .trailing)
-                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary).breezeNudge(x: 2)
             }.padding(16).contentShape(Rectangle())
-        }.buttonStyle(.plain).overlay(alignment: .bottom) { Divider().opacity(0.4).padding(.leading, 72) }
+        }.buttonStyle(.breezeRow).overlay(alignment: .bottom) { Divider().opacity(0.4).padding(.leading, 72) }
             .accessibilityLabel("\(model.displayName(device)), \(device.ip), \(device.evidence). Show device details.")
     }
 }
@@ -491,6 +538,200 @@ private struct NetworkDeviceDetail: View {
     }
     private func row(_ title: String, _ value: String) -> some View {
         GridRow { Text(title).foregroundStyle(.secondary); Text(value).fixedSize(horizontal: false, vertical: true) }
+    }
+}
+
+// MARK: - Route diagram
+
+/// Integrates time from TimelineView dates; never written to observable state.
+private final class PacketClock {
+    private var last: Date?
+    private var phase = 0.0
+    func advance(to date: Date) -> Double {
+        defer { last = date }
+        if let last { phase += min(max(date.timeIntervalSince(last), 0), 0.25) }
+        return phase
+    }
+}
+
+private struct RouteLine: Shape {
+    let from: CGFloat
+    let to: CGFloat
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            path.move(to: CGPoint(x: from, y: rect.midY))
+            path.addLine(to: CGPoint(x: to, y: rect.midY))
+        }
+    }
+}
+
+/// Mac, router and internet joined by a path; packets travel it at a rate bound to live traffic.
+private struct NetworkRouteDiagram: View {
+    let download: Double
+    let upload: Double
+    let broken: Bool
+    @State private var progress: CGFloat
+    @State private var clock = PacketClock()
+    @Environment(\.breezeMotionLevel) private var level
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let size = CGSize(width: 176, height: 28)
+    private static let first: ClosedRange<CGFloat> = 24...76
+    private static let second: ClosedRange<CGFloat> = 100...152
+    private static let router: CGFloat = 88
+    private static let travel = 2.4
+    private static let floor = 1_000.0
+
+    init(download: Double, upload: Double, broken: Bool) {
+        self.download = download
+        self.upload = upload
+        self.broken = broken
+        _progress = State(initialValue: BreezeMotion.firstTime("network.route") ? 0 : 1)
+    }
+
+    var body: some View {
+        let flowing = level.isActive && (download >= Self.floor || upload >= Self.floor)
+        ZStack {
+            RouteLine(from: Self.first.lowerBound, to: Self.first.upperBound)
+                .trim(from: 0, to: min(progress * 2, 1))
+                .stroke(networkMint.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+            RouteLine(from: Self.second.lowerBound, to: Self.second.upperBound)
+                .trim(from: 0, to: max(progress * 2 - 1, 0))
+                .stroke(networkMint.opacity(0.5), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                .opacity(broken ? 0 : 1)
+            RouteLine(from: Self.second.lowerBound, to: Self.second.upperBound)
+                .trim(from: 0, to: max(progress * 2 - 1, 0))
+                .stroke(Color.orange, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [3, 4]))
+                .opacity(broken ? 1 : 0)
+            Group {
+                Image(systemName: "laptopcomputer").position(x: 10, y: Self.size.height / 2)
+                Image(systemName: "wifi.router").position(x: Self.router, y: Self.size.height / 2)
+                Image(systemName: "globe").position(x: 166, y: Self.size.height / 2)
+            }.foregroundStyle(.tertiary).font(.system(size: 15))
+            if flowing {
+                TimelineView(.animation(minimumInterval: level.interval(fps: 20))) { context in
+                    let phase = clock.advance(to: context.date)
+                    Canvas { gc, _ in drawPackets(&gc, phase: phase) }
+                }
+            }
+        }
+        .frame(width: Self.size.width, height: Self.size.height)
+        .breezeAnimation(.settle, value: broken)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard progress < 1 else { return }
+            if reduceMotion { progress = 1 } else { withAnimation(BreezeMotion.draw) { progress = 1 } }
+        }
+    }
+
+    /// Stateless: each packet's position is a function of the integrated phase, the emit interval and its index.
+    private func drawPackets(_ gc: inout GraphicsContext, phase: Double) {
+        let start = Self.first.lowerBound
+        let end = broken ? Self.router : Self.second.upperBound
+        for (rate, color, towardMac, dy) in [(download, networkMint, true, CGFloat(-2.5)), (upload, networkSlate, false, CGFloat(2.5))] {
+            guard rate >= Self.floor else { continue }
+            let interval = min(max(1.2 - log10(max(rate, 1)) * 0.18, 0.15), 1.2)
+            let count = min(12, max(1, Int((Self.travel / interval).rounded())))
+            for index in 0..<count {
+                let along = (phase / Self.travel + Double(index) / Double(count)).truncatingRemainder(dividingBy: 1)
+                let x = start + (end - start) * CGFloat(towardMac ? 1 - along : along)
+                // Packets pass behind the router and stop there when the internet is unreachable.
+                guard Self.first.contains(x) || (!broken && Self.second.contains(x)) else { continue }
+                gc.fill(Path(ellipseIn: CGRect(x: x - 1.5, y: Self.size.height / 2 + dy - 1.5, width: 3, height: 3)), with: .color(color))
+            }
+        }
+    }
+}
+
+// MARK: - Connectivity strip
+
+private struct NetworkProbeBar: View {
+    let sample: ConnectivitySample
+    let lifted: Bool
+    @State private var grown: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(sample: ConnectivitySample, grows: Bool, lifted: Bool) {
+        self.sample = sample
+        self.lifted = lifted
+        _grown = State(initialValue: !grows)
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2).fill(sample.reachable ? networkMint.opacity(0.8) : Color.orange.opacity(0.8))
+            .frame(height: 16)
+            .scaleEffect(y: grown || reduceMotion ? 1 : 0.001, anchor: .bottom)
+            .offset(y: lifted ? -2 : 0)
+            .breezeAnimation(.hover, value: lifted)
+            .help("\(sample.date.formatted(date: .omitted, time: .standard)) · \(sample.reachable ? networkMS(sample.milliseconds) : "Probe failed")")
+            .onAppear { if !grown { BreezeMotion.animate(.settle) { grown = true } } }
+    }
+}
+
+/// Probe history: only probes newer than the strip's appearance grow in. One focus stop; hover or
+/// left/right arrows pick a probe and show its time and latency.
+private struct NetworkConnectivityStrip: View {
+    let samples: [ConnectivitySample]
+    @State private var appeared = Date.now
+    @State private var selected: Date?
+
+    private static let slots = 120
+    private static let gap: CGFloat = 2
+
+    var body: some View {
+        GeometryReader { geometry in
+            let barWidth = max(1, (geometry.size.width - Self.gap * CGFloat(Self.slots - 1)) / CGFloat(Self.slots))
+            let pitch = barWidth + Self.gap
+            HStack(alignment: .bottom, spacing: Self.gap) {
+                ForEach(samples, id: \.date) { sample in
+                    NetworkProbeBar(sample: sample, grows: sample.date > appeared, lifted: selected == sample.date)
+                        .frame(width: barWidth)
+                }
+                ForEach(samples.count..<max(samples.count, Self.slots), id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 2).fill(Color.primary.opacity(0.06)).frame(width: barWidth, height: 16)
+                        .help("No sample yet")
+                }
+            }.frame(height: 18, alignment: .bottom).contentShape(Rectangle())
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active(let point):
+                        let index = Int(point.x / pitch)
+                        selected = samples.indices.contains(index) ? samples[index].date : nil
+                    case .ended: selected = nil
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if let probe = samples.first(where: { $0.date == selected }), let index = samples.firstIndex(where: { $0.date == selected }) {
+                        // Half of a callout's typical width keeps it inside the strip.
+                        let centre = min(max(CGFloat(index) * pitch + barWidth / 2, 60), max(geometry.size.width - 60, 60))
+                        BreezeChartCallout(title: probe.date.formatted(date: .omitted, time: .standard),
+                                           value: probe.reachable ? networkMS(probe.milliseconds) : "Probe failed",
+                                           tint: probe.reachable ? networkMint : .orange)
+                            .position(x: centre, y: -24).allowsHitTesting(false)
+                    }
+                }
+        }.frame(height: 18)
+            .focusable(interactions: .activate)
+            .onKeyPress(.leftArrow) { step(-1) }
+            .onKeyPress(.rightArrow) { step(1) }
+            .onKeyPress(.escape) {
+                guard selected != nil else { return .ignored }
+                selected = nil
+                return .handled
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Connectivity history, \(samples.count) probes collected")
+            .accessibilityValue(samples.first { $0.date == selected }.map {
+                "\($0.date.formatted(date: .omitted, time: .standard)), \($0.reachable ? networkMS($0.milliseconds) : "Probe failed")"
+            } ?? "")
+    }
+
+    private func step(_ delta: Int) -> KeyPress.Result {
+        guard !samples.isEmpty else { return .ignored }
+        let current = samples.firstIndex { $0.date == selected } ?? (delta > 0 ? -1 : samples.count)
+        selected = samples[min(max(current + delta, 0), samples.count - 1)].date
+        return .handled
     }
 }
 

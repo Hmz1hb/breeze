@@ -8,6 +8,7 @@ public enum CleanupCategory: String, CaseIterable, Sendable {
     case models = "AI models", xcode = "Xcode & simulators", docker = "Docker"
     case applications = "Applications", leftovers = "App leftovers"
     case android = "Android emulators", downloads = "Downloaded installers", duplicates = "Duplicate files"
+    case snapshots = "Time Machine snapshots"
 
     public var symbol: String {
         switch self {
@@ -22,6 +23,7 @@ public enum CleanupCategory: String, CaseIterable, Sendable {
         case .android: "smartphone"
         case .downloads: "shippingbox.and.arrow.backward"
         case .duplicates: "doc.on.doc"
+        case .snapshots: "clock.arrow.circlepath"
         }
     }
 }
@@ -78,6 +80,7 @@ public enum CleanupAction: Sendable {
     case simulatorRuntime(id: String, build: String)
     case dockerImage(context: String, endpoint: String, id: String)
     case dockerBuildCache(context: String, endpoint: String, builder: String, id: String)
+    case localSnapshot(date: String)
 
     public var isPermanent: Bool {
         switch self { case .trash: false; default: true }
@@ -90,6 +93,7 @@ public enum CleanupAction: Sendable {
         case .simulatorRuntime(let id, _): "Permanently remove simulator runtime \(id) using xcrun simctl runtime delete. All simulators must be shut down."
         case .dockerImage(let context, _, let id): "Permanently remove Docker image \(id) in local context \(context), without forcing removal or pruning parents."
         case .dockerBuildCache(let context, _, let builder, let id): "Permanently prune only build cache record \(id) in local builder \(builder), context \(context)."
+        case .localSnapshot(let date): "Permanently delete the local Time Machine snapshot dated \(date) using tmutil deletelocalsnapshots. macOS deletes local snapshots for that date on every mounted disk."
         }
     }
 }
@@ -146,6 +150,7 @@ public struct CleanupEntry: Identifiable, Sendable {
         case .android: return resources.contains { $0.url.pathExtension == "avd" } ? .virtualDevices : .runtimes
         case .models: return .downloadable
         case .applications:
+            if let ownerID, CleanupInventoryBuilder.isMacOSInstaller(ownerID) { return .installers }
             if resources.contains(where: { $0.url.pathExtension == "app" }),
                let lastUsed, Date.now.timeIntervalSince(lastUsed) > 90 * 86_400 { return .applications }
         case .developer where risk == .review: return .downloadable

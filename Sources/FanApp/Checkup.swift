@@ -30,6 +30,8 @@ final class CheckupModel {
     var items: [CheckupItem] = []
     var running = false
     var date: Date?
+    /// Bumped each time results land; keys the once-per-run row reveal.
+    private(set) var runID = 0
 
     var summary: String {
         let issues = items.filter { $0.level >= .attention }.count
@@ -150,6 +152,7 @@ final class CheckupModel {
         if app.helperStatus != .enabled {
             add("Setup", "lock.shield", .tip, "Cooling helper isn’t set up", "Approve it once to control fans and limit charging.", page: .settings)
         }
+        runID += 1
         items = result.sorted { $0.level > $1.level }
     }
 
@@ -172,59 +175,126 @@ final class CheckupModel {
 
 struct CheckupView: View {
     @Bindable var model: AppModel
+    @State private var scrolled = false
+    @Environment(\.breezeMotionLevel) private var level
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var checkup: CheckupModel { model.checkup }
+    private var needsAttention: Bool { checkup.items.contains { $0.level >= .attention } }
+    private var title: String { checkup.running ? "Checking your Mac…" : checkup.summary }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Checkup").font(.system(size: 28, weight: .semibold, design: .rounded))
-                    Text("One look at everything that matters.").font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer()
+            BreezePageHeader("Checkup", subtitle: "One look at everything that matters.", scrolled: scrolled) {
                 if !checkup.items.isEmpty {
                     Button("Copy report", systemImage: "doc.on.doc") {
                         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(checkup.report, forType: .string)
                     }
                     Button("Save…", systemImage: "square.and.arrow.down") { checkup.save() }
                 }
-                Button(checkup.items.isEmpty ? "Run checkup" : "Run again", systemImage: "stethoscope") {
+                Button {
                     Task { await checkup.run(model) }
+                } label: {
+                    Label(checkup.items.isEmpty ? "Run checkup" : "Run again", systemImage: "stethoscope")
+                        .symbolEffect(.variableColor.iterative, isActive: checkup.running && level.isActive)
                 }.breezeAction(prominent: true).disabled(checkup.running)
-            }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 20)
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     HStack(spacing: 14) {
-                        Image(systemName: checkup.items.contains { $0.level >= .attention } ? "exclamationmark.circle" : "checkmark.seal")
-                            .font(.system(size: 34, weight: .light)).foregroundStyle(checkup.items.contains { $0.level >= .attention } ? .orange : BreezeStyle.mint)
+                        Image(systemName: needsAttention ? "exclamationmark.circle" : "checkmark.seal")
+                            .font(.system(size: 34, weight: .light)).foregroundStyle(needsAttention ? .orange : BreezeStyle.mint)
+                            .contentTransition(.symbolEffect(.replace))
+                            .phaseAnimator([1.0, 0.9], trigger: checkup.runID) { content, scale in
+                                content.scaleEffect(reduceMotion ? 1 : scale)
+                            } animation: { scale in
+                                scale < 1 ? nil : BreezeMotion.animation(.lift, reduceMotion: reduceMotion)
+                            }
+                            .breezeAnimation(.settle, value: needsAttention)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(checkup.running ? "Checking your Mac…" : checkup.summary).font(.title3.weight(.semibold))
+                            Text(title).font(.title3.weight(.semibold))
+                                .contentTransition(.opacity).breezeAnimation(.settle, value: title)
                             Text(checkup.date.map { "Last run \($0.formatted(date: .omitted, time: .shortened)) · thermals, battery, storage, memory and connection" }
                                  ?? "Reads sensors, battery, drives and memory. Nothing is changed.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if checkup.running { ProgressView().controlSize(.small) }
+                        if checkup.running { BreezeDelayedProgress().controlSize(.small) }
                     }.padding(20).breezeSurface()
-                    ForEach(checkup.items) { item in
-                        HStack(alignment: .top, spacing: 14) {
-                            Image(systemName: item.level.symbol).foregroundStyle(item.level.color).font(.title3).frame(width: 24)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(item.area.uppercased()).font(.system(size: 9, weight: .semibold)).tracking(0.7).foregroundStyle(.secondary)
-                                Text(item.title).font(.subheadline.weight(.medium))
-                                if !item.detail.isEmpty {
-                                    Text(item.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                            Spacer()
+                    ForEach(Array(checkup.items.enumerated()), id: \.element.id) { index, item in
+                        CheckupRow(item: item, index: index, key: "checkup.\(checkup.runID)") {
                             if let page = item.page, item.level != .good {
                                 Button("Open \(page.rawValue)") { model.page = page }.breezeAction(size: .small)
                             }
-                        }.padding(16).breezeSurface(radius: 16)
+                        }
                     }
-                }.padding(.horizontal, 28).padding(.bottom, 24)
+                }.padding(.horizontal, BreezeStyle.pagePadding).padding(.bottom, 24).breezeScrollEdge($scrolled)
             }
         }
         .task { if checkup.items.isEmpty { await checkup.run(model) } }
+    }
+}
+
+/// Evidence row: reveals once per run, then its level icon draws on and an attention bar grows in.
+private struct CheckupRow<Action: View>: View {
+    let item: CheckupItem
+    let index: Int
+    let key: String
+    @ViewBuilder let action: Action
+    @State private var marked: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(item: CheckupItem, index: Int, key: String, @ViewBuilder action: () -> Action) {
+        self.item = item
+        self.index = index
+        self.key = key
+        self.action = action()
+        _marked = State(initialValue: !BreezeMotion.firstTime(key))
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                if marked { icon }
+            }.font(.title3).frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.area.uppercased()).font(BreezeStyle.Typography.eyebrow)
+                    .tracking(BreezeStyle.Typography.eyebrowTracking).foregroundStyle(.secondary)
+                Text(item.title).font(.subheadline.weight(.medium))
+                if !item.detail.isEmpty {
+                    Text(item.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer()
+            action
+        }.padding(16).breezeSurface(radius: 16)
+            .overlay(alignment: .leading) {
+                if item.level >= .attention {
+                    Capsule().fill(item.level.color).frame(width: 3)
+                        .padding(.vertical, 12).padding(.leading, 5)
+                        .scaleEffect(y: marked || reduceMotion ? 1 : 0, anchor: .top)
+                        .opacity(marked ? 1 : 0)
+                        .animation(BreezeMotion.animation(.glide, reduceMotion: reduceMotion), value: marked)
+                        .accessibilityHidden(true)
+                }
+            }
+            .breezeReveal(index, key: key)
+            .task {
+                guard !marked else { return }
+                try? await Task.sleep(for: .seconds(BreezeMotion.delay(index)))
+                guard !Task.isCancelled else { return }
+                BreezeMotion.animate(.enter) { marked = true }
+            }
+    }
+
+    @ViewBuilder private var icon: some View {
+        let image = Image(systemName: item.level.symbol).foregroundStyle(item.level.color)
+            .accessibilityLabel(item.level.title)
+        if reduceMotion {
+            image.transition(.opacity)
+        } else if #available(macOS 26, *) {
+            image.transition(.symbolEffect(.drawOn))
+        } else {
+            image.transition(.symbolEffect(.appear))
+        }
     }
 }

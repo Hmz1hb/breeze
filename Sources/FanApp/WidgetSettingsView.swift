@@ -28,14 +28,19 @@ struct WidgetSettingsView: View {
                         Text("In the menu bar").font(.subheadline.weight(.semibold))
                         Text("Keep it compact, or pin a few live readings. Turn all readings off for just the Breeze icon.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        metricToggles(\.menuMetrics)
+                        metricToggles(\.menuMetrics, metrics: WidgetMetric.allCases)
+                        Toggle("Separate menu bar items", isOn: Binding(
+                            get: { model.widgetPreferences.separateItems ?? false },
+                            set: { model.widgetPreferences.separateItems = $0 ? true : nil }))
+                            .font(.system(size: 12))
+                            .help("Show each reading as its own menu bar item. Hold ⌘ and drag to arrange them; macOS remembers their positions.")
                     }
                     Divider()
                     VStack(alignment: .leading, spacing: 10) {
                         Text("At a glance").font(.subheadline.weight(.semibold))
                         Text("The headline readings at the top of the widget.")
                             .font(.caption).foregroundStyle(.secondary)
-                        metricToggles(\.metrics)
+                        metricToggles(\.metrics, metrics: WidgetMetric.popoverCases)
                     }
                     Divider()
                     VStack(alignment: .leading, spacing: 12) {
@@ -72,8 +77,12 @@ struct WidgetSettingsView: View {
     }
 
     private func preset(_ title: String, subtitle: String, symbol: String, preferences: WidgetPreferences) -> some View {
-        let selected = model.widgetPreferences == preferences
-        return Button { model.widgetPreferences = preferences } label: {
+        let selected = model.widgetPreferences.presetName == title
+        return Button {
+            var chosen = preferences
+            chosen.separateItems = model.widgetPreferences.separateItems
+            model.widgetPreferences = chosen
+        } label: {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Image(systemName: symbol)
@@ -88,9 +97,9 @@ struct WidgetSettingsView: View {
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func metricToggles(_ keyPath: WritableKeyPath<WidgetPreferences, Set<WidgetMetric>>) -> some View {
+    private func metricToggles(_ keyPath: WritableKeyPath<WidgetPreferences, Set<WidgetMetric>>, metrics: [WidgetMetric]) -> some View {
         LazyVGrid(columns: [GridItem(.flexible(), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 10) {
-            ForEach(WidgetMetric.allCases) { metric in
+            ForEach(metrics) { metric in
                 Toggle(isOn: selection(metric, in: keyPath)) {
                     Label(metric.title, systemImage: metric.symbol).font(.system(size: 12))
                 }

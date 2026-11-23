@@ -21,8 +21,27 @@ public struct CurvePoint: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// Which die readings drive curve and target modes. Heat boost always uses the hottest die.
+public enum CoolingSensor: String, Codable, CaseIterable, Sendable {
+    case hottest, cpu, gpu
+
+    public var title: String {
+        switch self { case .hottest: "Hottest die"; case .cpu: "CPU dies"; case .gpu: "GPU dies" }
+    }
+
+    public func temperature(in snapshot: Snapshot) -> Double? {
+        switch self {
+        case .hottest: snapshot.hottest
+        case .cpu: snapshot.cpuTemperature ?? snapshot.hottest
+        case .gpu: snapshot.gpuTemperature ?? snapshot.hottest
+        }
+    }
+}
+
 public struct CoolingConfiguration: Codable, Equatable, Sendable {
     public var mode: CoolingMode = .manual
+    /// Optional so profiles saved before sensor selection still decode; nil means hottest die.
+    public var sensor: CoolingSensor?
     public var manualPercent: Double = 100
     public var targetTemperature: Double = 75
     public var boostTemperature: Double = 90
@@ -97,6 +116,10 @@ public struct CoolingController: Sendable {
         if temperature == nil || pressure || (temperature ?? 0) >= configuration.boostTemperature { boostLatched = true }
         else if let temperature, temperature <= configuration.boostTemperature-3 { boostLatched = false }
 
+        // Curves and targets may follow a chosen group; it falls back to the hottest die when
+        // that group has no readings. Boost and sensor loss above stay on the hottest die.
+        let source = configuration.sensor ?? .hottest
+        let control = temperature == nil ? nil : source.temperature(in: snapshot)
         let demand: Double
         var message: String
         if boostLatched {
@@ -109,10 +132,10 @@ public struct CoolingController: Sendable {
                 demand = configuration.manualPercent
                 message = demand == 100 ? "Maximum cooling is active." : "Fixed fan speed is active."
             case .curve:
-                demand = try configuration.curvePercent(at: temperature ?? 100)
-                message = "Custom curve is following the hottest die sensor."
+                demand = try configuration.curvePercent(at: control ?? 100)
+                message = "Custom curve is following the \(source.title.lowercased())."
             case .target:
-                let current = temperature ?? 100
+                let current = control ?? 100
                 let error = current - configuration.targetTemperature
                 integral = max(-30, min(50, integral + error*elapsed*0.15))
                 let rising = previousTemperature.map { max(0, (current-$0)/max(0.25, elapsed)) } ?? 0
@@ -120,7 +143,7 @@ public struct CoolingController: Sendable {
                 message = "Adjusting fans toward \(Int(configuration.targetTemperature))°C."
             }
         }
-        previousTemperature = temperature
+        previousTemperature = control
         var output = demand
         // Respond immediately to rising demand. Slow reductions avoid fan hunting.
         if let previousPercent, demand < previousPercent {
@@ -128,7 +151,7 @@ public struct CoolingController: Sendable {
         }
         previousPercent = output
         if configuration.mode == .target, output >= 99,
-           let temperature, temperature > configuration.targetTemperature {
+           let control, control > configuration.targetTemperature {
             message = "Maximum cooling. The workload is still above the temperature target."
         }
         return CoolingDecision(percent: output.rounded(), boosted: boostLatched, message: message)

@@ -211,6 +211,43 @@ enum CleanupTools {
         return result
     }
 
+    /// Dates of local Time Machine snapshots only (`com.apple.TimeMachine.<date>.local`).
+    /// Software-update and other system snapshots are never offered.
+    static func localSnapshotDates(_ listing: String) -> [String] {
+        listing.split(whereSeparator: \.isNewline).compactMap { line in
+            let name = line.trimmingCharacters(in: .whitespaces)
+            let prefix = "com.apple.TimeMachine.", suffix = ".local"
+            guard name.hasPrefix(prefix), name.hasSuffix(suffix) else { return nil }
+            let date = String(name.dropFirst(prefix.count).dropLast(suffix.count))
+            return validSnapshotDate(date) ? date : nil
+        }
+    }
+
+    /// `YYYY-MM-DD-HHMMSS`, the only form tmutil accepts for a single date.
+    static func validSnapshotDate(_ date: String) -> Bool {
+        let parts = date.split(separator: "-", omittingEmptySubsequences: false)
+        return parts.map(\.count) == [4, 2, 2, 6] && parts.allSatisfy { $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }
+    }
+
+    static func listLocalSnapshots() async throws -> [String] {
+        let result = try await CleanupCommand.run("/usr/bin/tmutil", ["listlocalsnapshots", "/"])
+        return localSnapshotDates(String(decoding: try result.checked(), as: UTF8.self))
+    }
+
+    static func localSnapshots() async throws -> CleanupToolInventory {
+        var result = CleanupToolInventory()
+        do {
+            for date in try await listLocalSnapshots() {
+                result.entries.append(entry(id: "tm-snapshot:\(date)", title: "Local snapshot · \(date)", category: .snapshots, risk: .review,
+                    detail: "Local Time Machine snapshot of the startup disk. Its space shows as purgeable, macOS deletes local snapshots automatically when it needs room, and tmutil does not report a size, so recovered space is unknown.",
+                    recovery: "Cannot be restored. Backups already copied to your Time Machine disk are unaffected; Time Machine creates new local snapshots.",
+                    action: .localSnapshot(date: date), bytes: 0))
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch { result.issues.append("Time Machine local snapshots could not be listed: \(error.localizedDescription)") }
+        return result
+    }
+
     static func validImageID(_ id: String) -> Bool {
         id.hasPrefix("sha256:") && id.count == 71 && id.dropFirst(7).allSatisfy(\.isHexDigit)
     }
@@ -264,6 +301,14 @@ enum CleanupTools {
             }
             _ = try await dockerData(executable, context: context,
                 arguments: ["buildx", "--builder", builder, "prune", "--force", "--filter", "id=\(id)"])
+        case .localSnapshot(let date):
+            guard validSnapshotDate(date), try await listLocalSnapshots().contains(date) else {
+                throw StorageError("This snapshot no longer exists. Scan again.")
+            }
+            let result = try await CleanupCommand.run("/usr/bin/tmutil", ["deletelocalsnapshots", date], timeout: 90)
+            guard result.status == 0 else {
+                throw StorageError("macOS refused to delete this snapshot (\(result.error.isEmpty ? "status \(result.status)" : String(result.error.prefix(300)))). You can delete it in Terminal with: sudo tmutil deletelocalsnapshots \(date)")
+            }
         }
     }
 }

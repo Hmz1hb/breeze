@@ -191,4 +191,41 @@ public final class SMC {
         guard chargingInhibited else { return }
         try setCharging(allowed: true)
     }
+
+    public private(set) var adapterDisabled = false
+
+    /// CHIE (1 byte, 0x08 disconnects) on current firmware, CH0I (1 byte, 0x01) on earlier firmware.
+    /// CH0J is deliberately unsupported: open-source tools disagree on its value.
+    public var adapterControl: (key: String, off: UInt8)? {
+        if let (_, bytes) = try? raw("CHIE"), bytes.count == 1 { return ("CHIE", 0x08) }
+        if let (_, bytes) = try? raw("CH0I"), bytes.count == 1 { return ("CH0I", 0x01) }
+        return nil
+    }
+
+    public func setAdapter(enabled: Bool) throws {
+        guard let control = adapterControl else {
+            throw FanError("This Mac’s firmware doesn’t expose a supported adapter control.")
+        }
+        let value: [UInt8] = [enabled ? 0 : control.off]
+        if !enabled { adapterDisabled = true } // Include partial writes in restoration.
+        try WriteVerification.apply(attempts: 3, write: {
+            let result = breeze_smc_write(self.connection, control.key, 1, value)
+            guard result == 0 else { throw FanError("AppleSMC rejected \(control.key) (\(result)).") }
+        }, matches: { (try? self.raw(control.key))?.1 == value }, pause: { usleep(100_000) })
+        adapterDisabled = !enabled
+    }
+
+    public func restoreAdapter() throws {
+        guard adapterDisabled else { return }
+        try setAdapter(enabled: true)
+    }
+
+    /// Read-only probe for `--status`: which charging keys exist and their sizes in bytes.
+    public func chargingKeys() -> [String: Int] {
+        var keys: [String: Int] = [:]
+        for key in ["CHTE", "CH0B", "CH0C", "CHIE", "CH0I", "CH0J"] {
+            if let (_, bytes) = try? raw(key) { keys[key] = bytes.count }
+        }
+        return keys
+    }
 }

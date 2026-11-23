@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import FanCore
 
@@ -23,4 +24,36 @@ private func battery(_ percent: Double?, temperature: Double? = 30) -> BatterySt
     #expect(controller.next(battery(50, temperature: 33)).allow)
     config.heatLimit = 60
     #expect(throws: FanError.self) { try ChargeController(configuration: config) }
+}
+
+@Test func topUpChargesPastTheLimitUntilUnplugged() throws {
+    var config = ChargeConfiguration(); config.enabled = true; config.limit = 80; config.topUp = true
+    var controller = try ChargeController(configuration: config)
+    #expect(controller.next(battery(90)).allow)
+    #expect(controller.isToppingUp)
+    // Unplugging ends the top up for good; the limit applies again.
+    _ = controller.next(BatteryState(percent: 95, temperature: 30, externalConnected: false))
+    #expect(!controller.isToppingUp)
+    #expect(!controller.next(battery(95)).allow)
+}
+
+@Test func dischargeDisconnectsTheAdapterAboveTheLimitOnly() throws {
+    var config = ChargeConfiguration(); config.enabled = true; config.limit = 80; config.discharge = true
+    var controller = try ChargeController(configuration: config)
+    #expect(controller.next(battery(80.5)).adapter) // Within one point: no toggling at the limit.
+    #expect(!controller.next(battery(85)).adapter)
+    #expect(!controller.next(battery(81)).adapter)
+    #expect(controller.next(battery(80)).adapter)
+    #expect(controller.next(battery(nil)).adapter) // Missing readings always reconnect.
+    _ = controller.next(battery(90))
+    controller.stopDischarge()
+    #expect(controller.next(battery(90)).adapter)
+}
+
+@Test func topUpAndDischargeAreExclusiveAndOldSettingsDecode() throws {
+    var config = ChargeConfiguration(); config.topUp = true; config.discharge = true
+    #expect(throws: FanError.self) { try config.validate() }
+    let legacy = Data(#"{"enabled":true,"limit":80,"sailing":5,"heatProtection":false,"heatLimit":35}"#.utf8)
+    let decoded = try JSONDecoder().decode(ChargeConfiguration.self, from: legacy)
+    #expect(decoded.enabled && decoded.discharge == nil && decoded.topUp == nil && decoded.pauseDuringSleep == nil)
 }

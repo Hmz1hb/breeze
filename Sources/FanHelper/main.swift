@@ -2,6 +2,7 @@ import CHardware
 import Darwin
 import FanCore
 import Foundation
+import IOKit.pwr_mgt
 import os
 
 // launchd discards the daemon's stderr; the unified log keeps restoration failures visible:
@@ -11,6 +12,47 @@ private let logger = Logger(subsystem: "local.breeze.fancontrol.helper", categor
 func report(_ text: String) {
     logger.error("\(text, privacy: .public)")
     FileHandle.standardError.write(Data((text + "\n").utf8))
+}
+
+/// Defers system sleep until the session loop has acted, so charging is paused before
+/// the helper is suspended. The callback only records the request; the loop owns the SMC.
+final class SleepWatcher: @unchecked Sendable {
+    // IOKit message constants are C macros that do not import into Swift.
+    private static let canSystemSleep: UInt32 = 0xE000_0270
+    private static let systemWillSleep: UInt32 = 0xE000_0280
+    nonisolated(unsafe) static var current: SleepWatcher?
+
+    private let pending = OSAllocatedUnfairLock<Int?>(initialState: nil)
+    private var root: io_connect_t = 0
+    private var port: IONotificationPortRef?
+    private var notifier: io_object_t = 0
+
+    init?() {
+        root = IORegisterForSystemPower(nil, &port, { _, _, message, argument in
+            guard let watcher = SleepWatcher.current else { return }
+            let id = Int(bitPattern: argument)
+            if message == SleepWatcher.canSystemSleep { IOAllowPowerChange(watcher.root, id) }
+            else if message == SleepWatcher.systemWillSleep { watcher.pending.withLock { $0 = id } }
+        }, &notifier)
+        guard root != 0, let port else { return nil }
+        IONotificationPortSetDispatchQueue(port, DispatchQueue(label: "local.breeze.fancontrol.sleep"))
+        Self.current = self
+    }
+
+    /// Runs `prepare` and lets sleep continue, if a sleep is waiting.
+    func handlePending(_ prepare: () -> Void) {
+        guard let id = pending.withLock({ value -> Int? in defer { value = nil }; return value }) else { return }
+        prepare()
+        IOAllowPowerChange(root, id)
+    }
+
+    func close() {
+        handlePending {}
+        Self.current = nil
+        IODeregisterForSystemPower(&notifier)
+        IOServiceClose(root)
+        if let port { IONotificationPortDestroy(port) }
+    }
 }
 
 func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
@@ -23,6 +65,14 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                 usleep(200_000)
             }
         }
+        // Reconnect the adapter before charging, so the Mac is never left on battery.
+        for attempt in 0..<10 {
+            do { try smc.restoreAdapter(); break }
+            catch {
+                report("Reconnecting the power adapter (attempt \(attempt+1)): \(error.localizedDescription)")
+                usleep(200_000)
+            }
+        }
         // Never leave charging disabled after the session that requested it ends.
         for attempt in 0..<10 {
             do { try smc.restoreCharging(); break }
@@ -32,6 +82,8 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
             }
         }
     }
+    let sleepWatcher = SleepWatcher()
+    defer { sleepWatcher?.close() }
     try Wire.send(Reply(ok: true, message: "Cooling helper connected.", manual: false), to: fd)
     var configuration = CoolingConfiguration()
     configuration.mode = .automatic
@@ -69,9 +121,21 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
         do {
             if decision.allow == smc.chargingInhibited { try smc.setCharging(allowed: decision.allow) }
             chargeStatus = decision.message
+            if decision.adapter == smc.adapterDisabled {
+                do { try smc.setAdapter(enabled: decision.adapter) }
+                catch {
+                    // Unsupported or rejected adapter control ends discharge only; limiting continues.
+                    active.stopDischarge()
+                    charger = active
+                    try? smc.restoreAdapter()
+                    chargeStatus = "Discharge is unavailable on this Mac: \(error.localizedDescription)"
+                    report(chargeStatus ?? "")
+                }
+            }
         } catch {
             // A failed charging write disables the limiter rather than retrying a contested key.
             charger = nil
+            try? smc.restoreAdapter()
             do { try smc.restoreCharging(); chargeStatus = "\(error.localizedDescription) Charging is allowed." }
             catch let restore {
                 chargeStatus = "\(error.localizedDescription) Re-enabling charging failed: \(restore.localizedDescription)"
@@ -107,10 +171,20 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     func reply() -> Reply {
         Reply(ok: healthy, message: status, manual: smc.hasOverrides, percent: applied,
               boosted: boosted, suspended: suspended, mode: configuration.mode,
-              charging: chargeStatus, chargingPaused: smc.chargingInhibited, power: power)
+              charging: chargeStatus, chargingPaused: smc.chargingInhibited,
+              toppingUp: charger.map(\.isToppingUp), power: power)
     }
 
     while true {
+        sleepWatcher?.handlePending {
+            // With the adapter disconnected the Mac would drain overnight; reconnect it first.
+            do { try smc.restoreAdapter() } catch { report("Reconnecting the adapter before sleep: \(error.localizedDescription)") }
+            if charger?.configuration.pauseDuringSleep == true, !smc.chargingInhibited {
+                do { try smc.setCharging(allowed: false); chargeStatus = "Charging paused for sleep." }
+                catch { report("Pausing charging before sleep: \(error.localizedDescription)") }
+            }
+            lastCharge = 0 // Re-decide right after wake.
+        }
         // One owner controls the hardware. Reject additional clients promptly.
         let waiting = breeze_accept(listener, 0)
         if waiting >= 0 {
@@ -136,7 +210,7 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                         } else { chargeStatus = "Invalid charging settings were ignored." }
                     } else {
                         charger = nil
-                        do { try smc.restoreCharging(); chargeStatus = nil }
+                        do { try smc.restoreAdapter(); try smc.restoreCharging(); chargeStatus = nil }
                         catch { chargeStatus = "Re-enabling charging failed: \(error.localizedDescription)"; report(chargeStatus ?? "") }
                     }
                 case .configure, .manual:
@@ -193,8 +267,12 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
 func run() throws {
     let args = CommandLine.arguments
     if args.count == 2 && args[1] == "--status" {
-        let data = try JSONEncoder().encode(SMC().snapshot())
-        print(String(decoding: data, as: UTF8.self))
+        let smc = try SMC()
+        print(String(decoding: try JSONEncoder().encode(smc.snapshot()), as: UTF8.self))
+        // Read-only: shows which charging and adapter keys this Mac's firmware exposes.
+        let keys = try JSONSerialization.data(withJSONObject: ["chargingKeys": smc.chargingKeys(),
+            "adapterControl": smc.adapterControl?.key ?? "unsupported"], options: [.sortedKeys])
+        print(String(decoding: keys, as: UTF8.self))
         return
     }
     guard args.count == 2, args[1] == "--daemon", geteuid() == 0 else {

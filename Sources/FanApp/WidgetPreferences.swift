@@ -1,8 +1,10 @@
 import Foundation
 
 enum WidgetMetric: String, Codable, CaseIterable, Identifiable {
-    case temperature, fans, cpu, gpu, memory, storage
+    case temperature, fans, cpu, gpu, memory, storage, network, battery
     var id: Self { self }
+    /// Network and battery are menu bar readings only; the popover has its own sections.
+    static let popoverCases: [Self] = [.temperature, .fans, .cpu, .gpu, .memory, .storage]
     var title: String {
         switch self {
         case .temperature: "Temperature"
@@ -11,6 +13,8 @@ enum WidgetMetric: String, Codable, CaseIterable, Identifiable {
         case .gpu: "GPU"
         case .memory: "Memory"
         case .storage: "Storage"
+        case .network: "Network"
+        case .battery: "Battery"
         }
     }
     var symbol: String {
@@ -21,6 +25,8 @@ enum WidgetMetric: String, Codable, CaseIterable, Identifiable {
         case .gpu: "square.3.layers.3d"
         case .memory: "memorychip"
         case .storage: "internaldrive"
+        case .network: "arrow.up.arrow.down"
+        case .battery: "battery.75percent"
         }
     }
 }
@@ -48,16 +54,20 @@ struct WidgetPreferences: Codable, Equatable {
     var menuMetrics: Set<WidgetMetric> = [.temperature]
     var sections: Set<WidgetSection> = [.history, .controls]
     var historySeconds = 300
+    /// One menu bar item per reading. Optional so earlier saved preferences still decode.
+    var separateItems: Bool?
 
     static let simple = WidgetPreferences()
     static let detailed = WidgetPreferences(
-        metrics: Set(WidgetMetric.allCases),
+        metrics: Set(WidgetMetric.popoverCases),
         menuMetrics: [.temperature, .cpu, .memory],
         sections: Set(WidgetSection.allCases))
 
     var presetName: String {
-        if self == .simple { return "Simple" }
-        if self == .detailed { return "Detailed" }
+        var content = self
+        content.separateItems = nil
+        if content == .simple { return "Simple" }
+        if content == .detailed { return "Detailed" }
         return "Custom"
     }
     var needsActivityInPopover: Bool {
@@ -66,6 +76,8 @@ struct WidgetPreferences: Codable, Equatable {
     var needsActivityInMenuBar: Bool { menuMetrics.contains(.gpu) }
     var needsStorageInPopover: Bool { metrics.contains(.storage) || sections.contains(.storage) }
     var needsStorageInMenuBar: Bool { menuMetrics.contains(.storage) }
+    var needsNetworkInMenuBar: Bool { menuMetrics.contains(.network) }
+    var needsBatteryInMenuBar: Bool { menuMetrics.contains(.battery) }
 
     static func load(from data: Data?) -> Self {
         guard let data, var value = try? JSONDecoder().decode(Self.self, from: data) else { return .simple }

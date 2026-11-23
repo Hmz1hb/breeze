@@ -79,3 +79,23 @@ import Testing
         """.utf8))
     #expect(WidgetValues.value(.fans, model: model) == "Fanless")
 }
+
+@Test func menuBarRatesStayWithinThreeSignificantDigits() {
+    #expect(MenuBarReadings.rate(0) == "0 B/s")
+    #expect(MenuBarReadings.rate(999) == "999 B/s")
+    #expect(MenuBarReadings.rate(1_000) == "1.0 KB/s")
+    #expect(MenuBarReadings.rate(820_000) == "820 KB/s")
+    #expect(MenuBarReadings.rate(4_200_000) == "4.2 MB/s")
+    #expect(MenuBarReadings.rate(-5) == "0 B/s")
+}
+
+@Test func separateItemsAndNewMetricsKeepPresetsAndOldPreferences() throws {
+    var preferences = WidgetPreferences.detailed
+    preferences.separateItems = true
+    #expect(preferences.presetName == "Detailed")
+    #expect(!WidgetPreferences.detailed.metrics.contains(.network))
+    // Preferences saved before separateItems existed still decode.
+    let legacy = Data(#"{"metrics":["temperature"],"menuMetrics":["temperature"],"sections":["history"],"historySeconds":300}"#.utf8)
+    let decoded = WidgetPreferences.load(from: legacy)
+    #expect(decoded.separateItems == nil && decoded.menuMetrics == [.temperature])
+}

@@ -99,3 +99,37 @@ func pressureIncreasesCoolingInsteadOfReleasingControl(_ pressure: String) throw
     #expect(result.memoryUsed <= result.memoryTotal)
     #expect(result.uptime > 0)
 }
+
+private func dies(cpu: Double, gpu: Double?) -> Snapshot {
+    Snapshot(fans: [Fan(id: 0, current: 2500, minimum: 1499, maximum: 5348, target: 2500, mode: 1)],
+             temperatures: [Temperature(key: "Tp01", celsius: cpu)] + (gpu.map { [Temperature(key: "Tg05", celsius: $0)] } ?? []),
+             thermalPressure: "nominal")
+}
+
+@Test func curveFollowsTheChosenSensorGroupWhileBoostWatchesTheHottestDie() throws {
+    var profile = CoolingConfiguration(); profile.mode = .curve; profile.sensor = .gpu
+    var controller = try CoolingController(configuration: profile)
+    // GPU at 35°C maps to the curve's first point even though the CPU is warmer.
+    let cool = try controller.next(snapshot: dies(cpu: 70, gpu: 35), now: 0)
+    #expect(cool.percent == profile.points[0].percent)
+    #expect(!cool.boosted)
+    // A CPU die over the boost threshold still forces maximum cooling.
+    let hot = try controller.next(snapshot: dies(cpu: 95, gpu: 35), now: 1)
+    #expect(hot.percent == 100)
+    #expect(hot.boosted)
+}
+
+@Test func chosenSensorFallsBackToTheHottestDieWithoutReadings() throws {
+    #expect(CoolingSensor.gpu.temperature(in: dies(cpu: 72, gpu: nil)) == 72)
+    #expect(CoolingSensor.cpu.temperature(in: dies(cpu: 60, gpu: 80)) == 60)
+    #expect(CoolingSensor.hottest.temperature(in: dies(cpu: 60, gpu: 80)) == 80)
+}
+
+@Test func profilesSavedBeforeSensorSelectionStillDecode() throws {
+    let original = CoolingConfiguration()
+    var legacy = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+    legacy.removeValue(forKey: "sensor")
+    let decoded = try JSONDecoder().decode(CoolingConfiguration.self, from: JSONSerialization.data(withJSONObject: legacy))
+    #expect(decoded.sensor == nil)
+    #expect(decoded.mode == original.mode && decoded.points.map(\.temperature) == original.points.map(\.temperature))
+}

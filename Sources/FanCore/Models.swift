@@ -75,14 +75,15 @@ public struct Reply: Codable, Sendable {
     /// Charge limiter status; nil while macOS manages charging.
     public let charging: String?
     public let chargingPaused: Bool?
+    public let toppingUp: Bool?
     /// IOReport CPU energy, which recent macOS shares only with privileged readers.
     public let power: PrivilegedPower?
     public init(ok: Bool, message: String, manual: Bool, percent: Double? = nil,
                 boosted: Bool = false, suspended: Bool = false, mode: CoolingMode = .automatic,
-                charging: String? = nil, chargingPaused: Bool? = nil, power: PrivilegedPower? = nil) {
+                charging: String? = nil, chargingPaused: Bool? = nil, toppingUp: Bool? = nil, power: PrivilegedPower? = nil) {
         self.ok = ok; self.message = message; self.manual = manual
         self.percent = percent; self.boosted = boosted; self.suspended = suspended; self.mode = mode
-        self.charging = charging; self.chargingPaused = chargingPaused; self.power = power
+        self.charging = charging; self.chargingPaused = chargingPaused; self.toppingUp = toppingUp; self.power = power
     }
 }
 

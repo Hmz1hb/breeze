@@ -25,8 +25,12 @@ private func diskRate(_ value: Double?) -> String {
 // measurements and a four-point spacing grid match the rest of Breeze.
 struct StorageOverviewView: View {
     @Bindable var monitor: StorageMonitor
+    @State private var scrub: Date?
+    @Namespace private var rail
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        VStack(spacing: 0) {
         Group {
             if monitor.loading {
                 VStack(spacing: 12) {
@@ -59,6 +63,7 @@ struct StorageOverviewView: View {
             Spacer(minLength: 8)
             Text("Read-only monitoring").font(.caption2).foregroundStyle(.tertiary)
         }.padding(.horizontal, 28).frame(height: 44)
+        }
     }
 
     private var volumeRail: some View {
@@ -69,6 +74,7 @@ struct StorageOverviewView: View {
                 Text(monitor.drives.count.formatted()).font(.caption.monospacedDigit())
             }.foregroundStyle(.secondary).padding(.horizontal, 4).padding(.bottom, 4)
             ForEach(monitor.drives) { drive in
+                let selected = monitor.selectedID == drive.id
                 Button { monitor.selectedID = drive.id } label: {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(alignment: .top, spacing: 8) {
@@ -81,25 +87,28 @@ struct StorageOverviewView: View {
                             }
                             Spacer(minLength: 0)
                         }
-                        GeometryReader { geometry in
-                            Capsule().fill(.primary.opacity(0.07))
-                            Capsule().fill(drive.usedFraction >= 0.9 ? Color.orange : diskMint.opacity(0.7))
-                                .frame(width: geometry.size.width * drive.usedFraction)
-                        }.frame(height: 3)
+                        BreezeMeter(fraction: drive.usedFraction, tint: drive.usedFraction >= 0.9 ? Color.orange : diskMint.opacity(0.7), height: 3)
                         Text("\(diskSize(drive.free)) free").font(.caption).foregroundStyle(.secondary).monospacedDigit()
                     }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(monitor.selectedID == drive.id ? diskMint.opacity(0.09) : Color.primary.opacity(0.025),
-                                    in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(monitor.selectedID == drive.id ? diskMint.opacity(0.45) : .clear))
+                        .background {
+                            if selected {
+                                // One pill glides between drives; under Reduce Motion each drive gets its own id, so it crossfades.
+                                RoundedRectangle(cornerRadius: 12).fill(diskMint.opacity(0.09))
+                                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(diskMint.opacity(0.45)))
+                                    .matchedGeometryEffect(id: reduceMotion ? "selection.\(drive.id)" : "selection", in: rail)
+                            } else {
+                                RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.025))
+                            }
+                        }
                         .contentShape(RoundedRectangle(cornerRadius: 12))
                 }.buttonStyle(.plain)
-                    .accessibilityAddTraits(monitor.selectedID == drive.id ? .isSelected : [])
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                     .accessibilityLabel("\(drive.name), \(diskSize(drive.free)) free, \(Int(drive.usedFraction * 100)) percent used")
             }
             Label("APFS volumes can share the same free space. Capacity is never added across volumes.", systemImage: "square.stack.3d.up")
                 .font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4).padding(.top, 4)
-        }
+        }.breezeAnimation(.glide, value: monitor.selectedID)
     }
 
     private func capacity(_ drive: StorageDrive) -> some View {
@@ -112,8 +121,11 @@ struct StorageOverviewView: View {
                     .background(.primary.opacity(0.04), in: Capsule())
             }
             HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // Rolls from the previous drive's value on a switch only; the 30 s refresh lands without motion.
                 Text(diskSize(drive.free)).font(.system(size: 38, weight: .light, design: .rounded)).monospacedDigit()
                     .minimumScaleFactor(0.7).lineLimit(1)
+                    .contentTransition(reduceMotion ? .opacity : .numericText(value: Double(drive.free)))
+                    .breezeAnimation(.settle, value: drive.id)
                 Text("of breathing room").font(.subheadline).foregroundStyle(.secondary)
             }
             GeometryReader { geometry in
@@ -127,6 +139,8 @@ struct StorageOverviewView: View {
                     }
                 }
             }.frame(height: 20).accessibilityHidden(true)
+                .breezeAnimation(.settle, value: drive.usedFraction)
+                .breezeChartDrawIn(key: "storage.capacity")
             HStack(alignment: .firstTextBaseline) {
                 Text("\(diskSize(drive.used)) used · \(Int(drive.usedFraction * 100))%")
                 Spacer()
@@ -134,9 +148,10 @@ struct StorageOverviewView: View {
             }.font(.caption).foregroundStyle(.secondary).monospacedDigit()
             if drive.usedFraction >= 0.9 {
                 Label("Space is getting tight. Review files in Files & cleanup.", systemImage: "exclamationmark.circle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.orange).transition(.breezeFade)
             }
         }.padding(20).diskPanel()
+            .breezeAnimation(.settle, value: drive.usedFraction >= 0.9)
     }
 
     private func activity(_ drive: StorageDrive) -> some View {
@@ -161,7 +176,7 @@ struct StorageOverviewView: View {
                 if let latest = monitor.latest {
                     VStack(alignment: .trailing, spacing: 5) {
                         Text((latest.readIOPS + latest.writeIOPS).formatted(.number.precision(.fractionLength(0))))
-                            .font(.system(size: 18, weight: .medium, design: .rounded)).monospacedDigit()
+                            .font(.system(size: 18, weight: .medium, design: .rounded)).breezeLive()
                         Text("operations / sec").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -189,6 +204,7 @@ struct StorageOverviewView: View {
         let samples = monitor.samples
         let end = samples.last?.date ?? .now
         let peak = max(1, samples.map { max($0.readRate, $0.writeRate) / 1_000_000 }.max() ?? 1)
+        let selected = scrub.flatMap { BreezeMotion.nearest(samples, to: $0, by: \.date) }
         return Chart {
             ForEach(samples) { sample in
                 LineMark(x: .value("Time", sample.date), y: .value("Read MB/s", sample.readRate / 1_000_000), series: .value("Transfer", "Read"))
@@ -196,7 +212,19 @@ struct StorageOverviewView: View {
                 LineMark(x: .value("Time", sample.date), y: .value("Write MB/s", sample.writeRate / 1_000_000), series: .value("Transfer", "Write"))
                     .foregroundStyle(diskWrite).lineStyle(StrokeStyle(lineWidth: 1.7, dash: [4, 2]))
             }
+            if let selected {
+                RuleMark(x: .value("Time", selected.date)).foregroundStyle(.primary.opacity(0.25)).lineStyle(StrokeStyle(lineWidth: 1))
+                    .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        BreezeChartCallout(title: selected.date.formatted(.dateTime.hour().minute().second()),
+                                           value: "↓ \(diskRate(selected.readRate))  ↑ \(diskRate(selected.writeRate))")
+                    }
+                PointMark(x: .value("Time", selected.date), y: .value("Read MB/s", selected.readRate / 1_000_000))
+                    .foregroundStyle(diskMint).symbolSize(48)
+                PointMark(x: .value("Time", selected.date), y: .value("Write MB/s", selected.writeRate / 1_000_000))
+                    .foregroundStyle(diskWrite).symbolSize(48)
+            }
         }
+        .chartPlotStyle { $0.breezeChartDrawIn(key: "storage.activity") }
         .chartXScale(domain: end.addingTimeInterval(-Double(monitor.windowSeconds))...end)
         .chartYScale(domain: 0...(peak * 1.15))
         .chartYAxis {
@@ -206,6 +234,8 @@ struct StorageOverviewView: View {
             }
         }
         .chartXAxis { AxisMarks(values: .automatic(desiredCount: 3)) { _ in AxisValueLabel(format: .dateTime.hour().minute().second()) } }
+        .breezeChartScrub($scrub)
+        .breezeChartKeys($scrub, dates: samples.map(\.date))
         .frame(height: 112)
         .accessibilityLabel("Read and write activity over the last \(monitor.windowSeconds) seconds")
     }
@@ -223,8 +253,11 @@ struct StorageOverviewView: View {
             }
             HStack(alignment: .top, spacing: 24) {
                 healthValue(health.lifeRemaining.map { "\($0)%" } ?? "—", label: "Life remaining", detail: "Estimated endurance")
+                    .breezeReveal(0, key: "storage.health")
                 healthValue(health.temperature.map { "\(Int($0.rounded()))°C" } ?? "—", label: "Temperature", detail: "Device sensor")
+                    .breezeReveal(1, key: "storage.health")
                 healthValue(health.availableSpare.map { "\($0)%" } ?? "—", label: "Available spare", detail: "Reserve capacity")
+                    .breezeReveal(2, key: "storage.health")
             }
             if status.lowercased() == "failing" || (health.mediaErrors ?? 0) > 0 || (health.criticalWarning ?? 0) > 0 {
                 Label("The drive reports a warning. Check your backups and review diagnostics below.", systemImage: "exclamationmark.triangle")
@@ -282,12 +315,12 @@ struct StorageOverviewView: View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: title == "Read" ? "arrow.down" : "arrow.up")
                 .font(.caption).foregroundStyle(color)
-            Text(value).font(.system(size: 21, weight: .medium, design: .rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+            Text(value).font(BreezeStyle.Typography.numeralM).breezeLive().lineLimit(1).minimumScaleFactor(0.7)
         }
     }
     private func healthValue(_ value: String, label: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(value).font(.system(size: 26, weight: .light, design: .rounded)).monospacedDigit()
+            Text(value).font(.system(size: 26, weight: .light, design: .rounded)).breezeLive()
             Text(label).font(.caption)
             Text(detail).font(.system(size: 9)).foregroundStyle(.tertiary)
         }.frame(maxWidth: .infinity, alignment: .leading)

@@ -4,18 +4,19 @@ import SwiftUI
 
 struct MacInfoView: View {
     @Bindable var model: MacInfoModel
+    @State private var scrolled = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("This Mac").font(.system(size: 28, weight: .semibold, design: .rounded))
-                Spacer()
-                if model.loading { ProgressView().controlSize(.small).accessibilityLabel("Reading Mac information") }
+            BreezePageHeader("This Mac", subtitle: "", scrolled: scrolled) {
+                // Reserved slot: the spinner only appears after 0.3 s and never shifts the button.
+                ZStack { if model.loading { BreezeDelayedProgress("Reading Mac information").controlSize(.small).labelsHidden() } }
+                    .frame(width: 16, height: 16)
                 Button { Task { await model.refresh() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }.breezeAction(size: .regular).disabled(model.loading)
                     .help("Refresh Mac information").accessibilityLabel("Refresh Mac information")
-            }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 8)
+            }
 
             ScrollView {
                 VStack(spacing: 12) {
@@ -34,7 +35,7 @@ struct MacInfoView: View {
                         Text(model.operatingSystem).font(.system(size: 12)).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity).padding(.bottom, 8)
 
-                    group {
+                    group(0) {
                         row("Processor", lines: model.hardware.processorLines)
                         separator
                         row("Memory", lines: [model.hardware.memory ?? "Unavailable"])
@@ -45,23 +46,24 @@ struct MacInfoView: View {
                         separator
                         row("Display", lines: model.displays)
                     }
-                    group {
+                    group(1) {
                         row("Model identifier", lines: [model.hardware.modelIdentifier ?? "Unavailable"])
                         separator
                         row("Model year", lines: [model.identity.year ?? "Unavailable"])
                         separator
                         row("Serial number", lines: [model.hardware.serialNumber ?? "Unavailable"])
                     }
-                    group {
+                    group(2) {
                         TimelineView(.periodic(from: .now, by: 60)) { _ in
                             row("Uptime", lines: [MacInfoModel.uptime(SystemUptime.sinceBoot)])
                                 .help("Time since the last restart, including sleep")
                         }
                     }
-                }.padding(.horizontal, 28).padding(.bottom, 28)
+                }.padding(.horizontal, BreezeStyle.pagePadding).padding(.bottom, 28).breezeScrollEdge($scrolled)
+                    .breezeAnimation(.settle, value: model.loaded)
             }
         }
-        .task { await model.refresh() }
+        .task { if !model.loaded { await model.refresh() } }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             model.refreshDisplays()
         }
@@ -73,9 +75,10 @@ struct MacInfoView: View {
         }
     }
 
-    private func group<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    private func group<Content: View>(_ index: Int, @ViewBuilder content: () -> Content) -> some View {
         VStack(spacing: 0, content: content)
             .breezeSurface(radius: 18)
+            .breezeReveal(index, key: "mac")
     }
 
     private var separator: some View { Divider().padding(.horizontal, 14).opacity(0.55) }
@@ -87,6 +90,7 @@ struct MacInfoView: View {
             Text(lines.isEmpty ? (model.loading ? "Reading…" : "Unavailable") : lines.joined(separator: "\n"))
                 .fontWeight(.medium).multilineTextAlignment(.trailing).textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
         }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 12)
             .frame(maxWidth: .infinity, minHeight: 40)
             .accessibilityElement(children: .combine)
