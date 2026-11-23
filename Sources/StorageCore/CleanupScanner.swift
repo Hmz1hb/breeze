@@ -245,6 +245,13 @@ final class CleanupInventoryBuilder {
         }
     }
 
+    /// Path inside the scanned folder, so a generic module like `app` still shows its project.
+    static func projectLabel(_ directory: URL, root: URL) -> String {
+        let base = root.standardizedFileURL.pathComponents, path = directory.standardizedFileURL.pathComponents
+        guard path.count > base.count, Array(path.prefix(base.count)) == base else { return directory.lastPathComponent }
+        return path.dropFirst(base.count).joined(separator: "/")
+    }
+
     func findProjects(_ root: URL) throws {
         do { try CleanupFiles.validateLocation(root) }
         catch { recordIssue(error, location: root.path); return }
@@ -264,7 +271,7 @@ final class CleanupInventoryBuilder {
                       values.isDirectory == true, values.isSymbolicLink != true, values.isPackage != true,
                       values.isUbiquitousItem != true else { continue }
                 if let rule = CleanupCatalog.projects.first(where: { $0.name == url.lastPathComponent && ($0.markers.isEmpty || $0.markers.contains(where: names.contains)) }) {
-                    append(title: "\(directory.lastPathComponent) · \(rule.name)", urls: [url], category: .projects,
+                    append(title: "\(Self.projectLabel(directory, root: root)) · \(rule.name)", urls: [url], category: .projects,
                            risk: rule.risk, detail: rule.detail + " Project: \(directory.path). Modification dates are not proof of last use.",
                            recovery: rule.recovery, processes: rule.processes)
                 } else if !url.lastPathComponent.hasPrefix("."), StorageScanner.allowed(url) {

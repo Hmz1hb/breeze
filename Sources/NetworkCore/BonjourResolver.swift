@@ -49,7 +49,8 @@ extension LocalDiscovery {
         // It need not have an SRV record, so resolving _device-info as a TCP service
         // alone would miss it.
         var txt = service.txt
-        if txt["model"] == nil, txt["md"] == nil {
+        // AirPlay uses model, RAOP am, and companion-link rpMd.
+        if txt["model"] == nil, txt["md"] == nil, txt["am"] == nil, txt["rpMd"] == nil {
             let hostLabel = String(host.dropLast(".local.".count))
             for label in Set([name, hostLabel]) where !Task.isCancelled {
                 var fullName = [CChar](repeating: 0, count: Int(kDNSServiceMaxDomainName))
@@ -66,7 +67,7 @@ extension LocalDiscovery {
             device.merge(LocalDevice(ip: ip, name: String(host.dropLast(".local.".count).prefix(120)), evidence: device.evidence))
             device.services = [type]
             device.responded = true
-            device.model = (txt["model"] ?? txt["md"] ?? txt["ty"]).map { String($0.prefix(120)) }
+            device.model = (txt["model"] ?? txt["am"] ?? txt["rpMd"] ?? txt["md"] ?? txt["ty"]).map { String($0.prefix(120)) }
             device.manufacturer = (txt["manufacturer"] ?? txt["mfg"]).map { String($0.prefix(120)) }
             return device
         }

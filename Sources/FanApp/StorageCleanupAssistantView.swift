@@ -25,7 +25,7 @@ struct StorageCleanupAssistantView: View {
                     if client == "other" {
                         connection
                     } else {
-                        DisclosureGroup("Manual connection and copy options") { connection.padding(.top, 12) }
+                        BreezeDisclosure("Manual connection and copy options") { connection.padding(.top, 12) }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -146,7 +146,7 @@ struct StorageCleanupAssistantView: View {
                 }
             }
             if let response = model.assistantResponse {
-                DisclosureGroup("Assistant response") {
+                BreezeDisclosure("Assistant response") {
                     Text(response).font(.caption).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                 }

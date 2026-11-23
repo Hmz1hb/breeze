@@ -3,6 +3,7 @@ import SwiftUI
 
 struct BatteryView: View {
     @Bindable var model: BatteryModel
+    @Bindable var app: AppModel
     private let accent = Color(red: 0.22, green: 0.67, blue: 0.55)
 
     var body: some View {
@@ -25,6 +26,7 @@ struct BatteryView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
                             overview(reading)
+                            chargeLimit
                             HStack(alignment: .top, spacing: 12) {
                                 metric(reading.reportedHealthPercent == nil ? "ESTIMATED HEALTH" : "BATTERY HEALTH",
                                        value: number(reading.healthPercent, unit: "%", decimals: 0),
@@ -67,6 +69,7 @@ struct BatteryView: View {
                             Text("Positive battery current means charging; negative means discharging. Adapter input telemetry is available on supported Macs; missing readings show as unavailable.")
                                 .font(.caption).foregroundStyle(.secondary)
                             charger(reading)
+                            devices
                             Text(reading.reportedHealthPercent == nil
                                  ? "Health is estimated from nominal capacity (or full charge capacity when unavailable) divided by design capacity. It can differ from Battery Health in System Settings. Unsupported readings are shown as unavailable."
                                  : "Battery health is the maximum capacity reported by macOS. Health and battery identity refresh once a minute; live power readings refresh every five seconds. Unsupported readings are shown as unavailable.")
@@ -74,8 +77,13 @@ struct BatteryView: View {
                         }.padding(.horizontal, 28).padding(.bottom, 24)
                     }
                 case .noBattery:
-                    ContentUnavailableView("No built-in battery", systemImage: "desktopcomputer",
-                                           description: Text("This Mac does not report an installed internal battery."))
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            ContentUnavailableView("No built-in battery", systemImage: "desktopcomputer",
+                                                   description: Text("This Mac does not report an installed internal battery."))
+                            devices
+                        }.padding(.horizontal, 28).padding(.bottom, 24)
+                    }
                 case .unavailable:
                     ContentUnavailableView("Battery readings unavailable", systemImage: "battery.0percent",
                                            description: Text("macOS could not provide battery details. Try refreshing."))
@@ -127,6 +135,101 @@ struct BatteryView: View {
             Spacer(minLength: 0)
         }.padding(22).frame(maxWidth: .infinity, alignment: .leading)
             .breezeSurface()
+    }
+
+    private var chargeLimit: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label("Charge limit", systemImage: "battery.100percent.circle").font(.headline)
+                Spacer()
+                if app.chargingPaused {
+                    Text("CHARGING PAUSED").font(.system(size: 8, weight: .semibold)).foregroundStyle(accent)
+                        .padding(5).background(accent.opacity(0.12), in: Capsule())
+                }
+                Toggle("Charge limit", isOn: $app.charge.enabled).labelsHidden().toggleStyle(.switch)
+            }
+            HStack {
+                Text("Stop charging at")
+                Spacer()
+                Text("\(Int(app.charge.limit))%").font(.title3).monospacedDigit()
+            }.font(.subheadline)
+            Slider(value: $app.charge.limit, in: 50...100, step: 5).tint(accent).disabled(!app.charge.enabled)
+                .accessibilityLabel("Charge limit")
+            HStack {
+                Text("Resume charging below \(Int(app.charge.limit - app.charge.sailing))%").font(.subheadline)
+                Spacer()
+                Stepper("Sailing range \(Int(app.charge.sailing))%", value: $app.charge.sailing, in: 0...20, step: 1).fixedSize()
+            }.disabled(!app.charge.enabled)
+            Divider()
+            HStack {
+                Toggle("Heat protection: pause charging above", isOn: $app.charge.heatProtection).toggleStyle(.switch)
+                Spacer()
+                Stepper("\(Int(app.charge.heatLimit))°C", value: $app.charge.heatLimit, in: 30...45, step: 1)
+                    .fixedSize().disabled(!app.charge.heatProtection)
+            }.font(.subheadline)
+            HStack(alignment: .firstTextBaseline) {
+                Text(app.chargeStatus ?? (app.charge.isActive ? "Apply to start the charge limiter." : "macOS manages charging."))
+                    .font(.caption).foregroundStyle(app.chargeStatus == nil ? .secondary : accent)
+                Spacer()
+                Button(app.charge.isActive ? "Apply" : "Return charging to macOS") { Task { await app.applyCharge() } }
+                    .breezeAction(prominent: app.charge.isActive).disabled(app.busy)
+            }
+            Text("Holding a battery below 100% while plugged in reduces wear. Breeze pauses charging through the approved helper; your Mac keeps running on adapter power. The limit applies while Breeze is open: quitting, disconnecting the helper or restarting returns charging to macOS. If the battery reading is unavailable, charging is allowed.")
+                .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.padding(20).breezeSurface()
+    }
+
+    private var devices: some View {
+        section("Bluetooth devices", symbol: "dot.radiowaves.left.and.right") {
+            let devices = app.deviceBatteries.devices
+            if !app.deviceBatteries.needsAccess.isEmpty && !app.deviceBatteries.accessDismissed { logitechAccess }
+            if devices.isEmpty {
+                Text(app.deviceBatteries.updated == nil ? "Looking for connected devices…" :
+                        app.deviceBatteries.failed ? "macOS could not list Bluetooth devices." : "No connected device reports a battery level.")
+                    .font(.subheadline).foregroundStyle(.secondary).padding(14)
+            }
+            ForEach(devices) { device in
+                HStack(spacing: 12) {
+                    Image(systemName: device.symbol).foregroundStyle(accent).frame(width: 22)
+                    Text(device.name).font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Text(device.levels.map { ($0.label.isEmpty ? "" : "\($0.label) ") + "\($0.percent)%" }.joined(separator: " · "))
+                        .font(.system(size: 12)).monospacedDigit()
+                        .foregroundStyle((device.lowest ?? 100) <= 20 ? .orange : .primary)
+                }.padding(.horizontal, 14).padding(.vertical, 10).accessibilityElement(children: .combine)
+            }
+            Text("Levels come from macOS Bluetooth information and refresh every minute while this page is open. Many third-party devices don’t report a battery level.")
+                .font(.caption).foregroundStyle(.secondary).padding(14)
+            if !app.deviceBatteries.needsAccess.isEmpty && app.deviceBatteries.accessDismissed {
+                Button("Show Logitech battery…") { app.deviceBatteries.accessDismissed = false }
+                    .breezeAction(size: .small).padding([.horizontal, .bottom], 14)
+            }
+        }
+    }
+
+    /// Explains the Input Monitoring prompt in plain words before Breeze ever triggers it.
+    private var logitechAccess: some View {
+        let names = ListFormatter.localizedString(byJoining: app.deviceBatteries.needsAccess)
+        return VStack(alignment: .leading, spacing: 10) {
+            Label("Breeze found your \(names)", systemImage: "computermouse").font(.system(size: 13, weight: .semibold))
+            Text("Logitech doesn’t share battery levels with macOS, so Breeze has to ask the device directly. macOS only allows that with the **Input Monitoring** permission, and its prompt says Breeze wants to “receive keystrokes from any application”. That wording covers every app that talks to a mouse or keyboard.")
+            Text("Breeze only asks the device for its battery level and name. It doesn’t read your typing, clicks or movement, and nothing leaves your Mac. Without the permission, everything else in Breeze works as usual.")
+            if app.deviceBatteries.accessDenied {
+                Text("Input Monitoring is off for Breeze. Turn on Breeze in System Settings → Privacy & Security → Input Monitoring. macOS may ask you to reopen Breeze.")
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Spacer()
+                Button("Not now") { app.deviceBatteries.accessDismissed = true }.breezeAction()
+                if app.deviceBatteries.accessDenied {
+                    Button("Open Privacy & Security") {
+                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!)
+                    }.breezeAction(prominent: true)
+                } else {
+                    Button("Continue") { app.deviceBatteries.requestAccess() }.breezeAction(prominent: true)
+                }
+            }
+        }.font(.caption).fixedSize(horizontal: false, vertical: true).padding(14)
     }
 
     private func charger(_ reading: BatteryReading) -> some View {

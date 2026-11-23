@@ -1,0 +1,99 @@
+import Foundation
+import IOKit
+
+/// Charge limiting runs in the helper only while a Breeze control session is connected.
+/// Ending the session always re-enables charging.
+public struct ChargeConfiguration: Codable, Equatable, Sendable {
+    public var enabled = false
+    public var limit: Double = 80
+    /// Charging resumes only after the battery falls this far below the limit.
+    public var sailing: Double = 5
+    public var heatProtection = false
+    public var heatLimit: Double = 35
+    public init() {}
+
+    public var isActive: Bool { enabled || heatProtection }
+
+    public func validate() throws {
+        guard limit.isFinite, (50...100).contains(limit), sailing.isFinite, (0...20).contains(sailing),
+              heatLimit.isFinite, (30...45).contains(heatLimit) else {
+            throw FanError("Choose a charge limit of 50–100%, a sailing range of 0–20% and a heat limit of 30–45°C.")
+        }
+    }
+}
+
+public struct BatteryState: Sendable {
+    public let percent: Double?
+    public let temperature: Double?
+    public let externalConnected: Bool
+    public init(percent: Double?, temperature: Double?, externalConnected: Bool) {
+        self.percent = percent; self.temperature = temperature; self.externalConnected = externalConnected
+    }
+
+    public static func read() -> BatteryState? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != 0 else { return nil }
+        defer { IOObjectRelease(service) }
+        func number(_ key: String) -> Double? {
+            (IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? NSNumber)?.doubleValue
+        }
+        var percent: Double?
+        if let current = number("CurrentCapacity"), let maximum = number("MaxCapacity"), maximum > 0, current >= 0 {
+            percent = min(100, current / maximum * 100)
+        }
+        let temperature = number("Temperature").map { $0 / 100 }.flatMap { (0...100).contains($0) ? $0 : nil }
+        let external = IORegistryEntryCreateCFProperty(service, "ExternalConnected" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool ?? false
+        return BatteryState(percent: percent, temperature: temperature, externalConnected: external)
+    }
+}
+
+public struct ChargeDecision: Equatable, Sendable {
+    public let allow: Bool
+    public let message: String
+}
+
+/// Pure decision logic with hysteresis; the helper owns the SMC writes.
+public struct ChargeController: Sendable {
+    public private(set) var configuration: ChargeConfiguration
+    private var holding = false
+    private var hot = false
+
+    public init(configuration: ChargeConfiguration) throws {
+        try configuration.validate()
+        self.configuration = configuration
+    }
+
+    public mutating func next(_ battery: BatteryState?) -> ChargeDecision {
+        guard configuration.isActive else { return ChargeDecision(allow: true, message: "macOS manages charging.") }
+        // Missing readings must never leave charging disabled.
+        guard let battery, let percent = battery.percent else {
+            holding = false; hot = false
+            return ChargeDecision(allow: true, message: "Battery reading unavailable: charging is allowed.")
+        }
+        if configuration.heatProtection, let temperature = battery.temperature {
+            if temperature >= configuration.heatLimit { hot = true }
+            else if temperature <= configuration.heatLimit - 2 { hot = false }
+        } else { hot = false }
+        if configuration.enabled {
+            if percent >= configuration.limit { holding = true }
+            else if percent <= configuration.limit - configuration.sailing { holding = false }
+        } else { holding = false }
+
+        let limit = Int(configuration.limit), resume = Int(configuration.limit - configuration.sailing)
+        let message: String
+        if hot {
+            message = "Battery is \(Int(battery.temperature ?? 0))°C: charging paused until it cools by 2°C."
+        } else if holding {
+            message = configuration.sailing > 0
+                ? "Holding at \(limit)%. Charging resumes below \(resume)%."
+                : "Holding at \(limit)%."
+        } else if configuration.enabled {
+            message = battery.externalConnected ? "Charging to \(limit)%." : "On battery. Charging will stop at \(limit)%."
+        } else {
+            message = "Heat protection is watching the battery temperature."
+        }
+        return ChargeDecision(allow: !(hot || holding), message: message)
+    }
+}

@@ -71,7 +71,9 @@ struct Dashboard: View {
         } else if model.page == .mac {
             MacInfoView(model: model.macInfo)
         } else if model.page == .battery {
-            BatteryView(model: model.battery)
+            BatteryView(model: model.battery, app: model)
+        } else if model.page == .checkup {
+            CheckupView(model: model)
         } else {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -96,7 +98,7 @@ struct Dashboard: View {
                     case .cooling: cooling
                     case .statistics: statistics
                     case .settings: settings
-                    case .storage, .network, .mac, .battery: EmptyView()
+                    case .storage, .network, .mac, .battery, .checkup: EmptyView()
                     }
                 }.padding(.horizontal, 26).padding(.bottom, 20)
             }.frame(maxHeight: .infinity)
@@ -121,6 +123,7 @@ struct Dashboard: View {
         case .network: "Your connection, and the devices around it."
         case .mac: "Get to know the Mac you’re working on."
         case .battery: "Charge, health, and the power coming in."
+        case .checkup: "One look at everything that matters."
         }
     }
 
@@ -219,6 +222,7 @@ struct Dashboard: View {
                         .disabled(model.busy || model.snapshot?.canControl != true)
                 }
             }.padding(20).breezeSurface()
+            CoolingAutomationView(model: model).padding(20).breezeSurface()
             fanList.padding(20).breezeSurface()
             temperatureChart.padding(20).breezeSurface()
         }
@@ -379,6 +383,10 @@ struct Dashboard: View {
         VStack(alignment: .leading, spacing: 24) {
             WidgetSettingsView(model: model)
             Divider()
+            AlertSettingsView(alerts: model.alerts)
+            Divider()
+            AssistantSettingsView(cleanup: model.storage.cleanup)
+            Divider()
             VStack(alignment: .leading, spacing: 14) {
                 Text("Cooling helper").font(.headline)
                 Text(model.helperStatus == .enabled ? "Approved · ready for fan control" : model.helperStatus == .requiresApproval ? "Waiting for approval in System Settings" : "One-time setup required")
@@ -423,6 +431,10 @@ struct Dashboard: View {
                 Text("Control & recovery").font(.headline)
                 Text("Automatic control is restored on quit, disconnect, or a stalled app. Hardware firmware can still reject an override; Breeze reports that separately. RPM always stays within the Mac’s reported limits.")
                     .font(.caption).foregroundStyle(.secondary)
+                if model.charge.isActive {
+                    Text("Disconnecting the helper also turns off the charge limit until Breeze reconnects.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 HStack {
                     Button("Return to Automatic") { Task { await model.automatic() } }.disabled(model.busy)
                     if model.enabled { Button("Disconnect helper") { Task { await model.disable() } }.disabled(model.busy) }
@@ -447,5 +459,34 @@ struct Dashboard: View {
             Text(text).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.font(.caption).padding(12).frame(maxWidth: .infinity, alignment: .leading)
             .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Same stored values as Cleanup & apps → AI options, so both places stay in sync.
+private struct AssistantSettingsView: View {
+    let cleanup: StorageCleanupModel
+    @AppStorage("cleanupAssistantClient") private var client = "codex"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("AI assistant").font(.headline)
+            Picker("Assistant for Ask AI", selection: $client) {
+                ForEach(CleanupAssistantClient.allCases, id: \.rawValue) { Text($0.name).tag($0.rawValue) }
+            }.pickerStyle(.segmented).fixedSize().disabled(cleanup.assistantRunning)
+            if let selected = CleanupAssistantClient(rawValue: client) {
+                if let executable = selected.executable {
+                    Label("\(selected.name) is installed", systemImage: "checkmark.circle")
+                        .font(.caption).foregroundStyle(BreezeStyle.mint).help(executable.path)
+                } else {
+                    Label("Install \(selected.name)'s official CLI and sign in from Terminal once.", systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Toggle("Share cleanup metadata with my assistant", isOn: Binding(
+                get: { cleanup.assistantSharing }, set: { cleanup.setAssistantSharing($0) }))
+                .disabled(cleanup.cleaning)
+            Text("Ask AI in Cleanup & apps uses this assistant with your CLI's own sign-in. It shares item names, sizes, dates and shortened paths, never file contents. You approve every removal in Breeze.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

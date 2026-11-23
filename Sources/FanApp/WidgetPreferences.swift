@@ -26,7 +26,7 @@ enum WidgetMetric: String, Codable, CaseIterable, Identifiable {
 }
 
 enum WidgetSection: String, Codable, CaseIterable, Identifiable {
-    case history, fans, cpu, memory, storage, sensors, processes, controls
+    case history, fans, cpu, memory, storage, sensors, processes, devices, controls
     var id: Self { self }
     var title: String {
         switch self {
@@ -37,6 +37,7 @@ enum WidgetSection: String, Codable, CaseIterable, Identifiable {
         case .storage: "Storage capacity & disk activity"
         case .sensors: "Thermal pressure & die sensors"
         case .processes: "Top processes"
+        case .devices: "Bluetooth device batteries"
         case .controls: "Cooling controls"
         }
     }

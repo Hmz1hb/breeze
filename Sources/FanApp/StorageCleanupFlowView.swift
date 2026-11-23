@@ -126,7 +126,7 @@ struct StorageCleanupReview: View {
                                 Label("Protected because it runs Breeze or belongs to another user.", systemImage: "lock")
                                     .font(.caption).foregroundStyle(.orange)
                             }
-                            DisclosureGroup("Full command") {
+                            BreezeDisclosure("Full command") {
                                 Text(process.command).font(.caption.monospaced()).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
                             }.font(.caption)
                         }.frame(maxWidth: .infinity, alignment: .leading)
@@ -178,7 +178,7 @@ struct StorageCleanupReview: View {
                         if let reason = model.assistantReviewReasons[entry.id] {
                             Text("AI suggestion: " + reason).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
-                        DisclosureGroup("What’s included") {
+                        BreezeDisclosure("What’s included") {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(entry.detail)
                                 Text(entry.action.explanation)

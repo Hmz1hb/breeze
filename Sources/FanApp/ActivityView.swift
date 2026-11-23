@@ -91,6 +91,12 @@ struct ActivityView<Thermal: View>: View {
                 }
             }.padding(20).activitySurface()
             historyChart("CPU utilization", value: { $0.cpu?.used })
+            powerPanel
+            if model.latest?.power?.cpuWatts != nil {
+                historyChart("CPU power", color: .orange, unit: "W", maximum: nil, value: { $0.power?.cpuWatts })
+            } else if model.latest?.power?.systemWatts != nil {
+                historyChart("Whole-Mac power", color: .orange, unit: "W", maximum: nil, value: { $0.power?.systemWatts })
+            }
             VStack(alignment: .leading, spacing: 12) {
                 Text("Load per core").font(.headline)
                 if let cores = model.latest?.cores, !cores.isEmpty {
@@ -112,11 +118,54 @@ struct ActivityView<Thermal: View>: View {
                     Text("Processor").font(.headline)
                     valueRow("Physical cores", value: model.physicalCores.map(String.init) ?? "—")
                     valueRow("Logical cores", value: String(model.logicalCores))
-                    Text("Load is the number of runnable or waiting tasks. Live clock frequency isn’t exposed by this monitor.")
+                    Text("Load is the number of runnable or waiting tasks.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(20).activitySurface()
             }
         }
+    }
+
+    private var powerPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Power & frequency").font(.headline)
+                Spacer()
+                if let system = model.latest?.power?.systemWatts {
+                    Text("Whole Mac \(watts(system))").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            if let power = model.latest?.power {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                    valueRow("CPU power", value: power.cpuWatts.map(watts) ?? "Needs helper")
+                    valueRow("GPU power", value: watts(power.gpuWatts))
+                    valueRow("Neural Engine power", value: power.aneWatts.map(watts) ?? "Needs helper")
+                    valueRow("Whole Mac", value: power.systemWatts.map(watts) ?? "—")
+                    valueRow("Efficiency cores", value: cluster(power.efficiencyMHz, power.efficiencyActive))
+                    valueRow("Performance cores", value: cluster(power.performanceMHz, power.performanceActive))
+                }
+                if power.cpuWatts == nil {
+                    HStack(alignment: .top, spacing: 10) {
+                        Label("macOS shares CPU and Neural Engine energy only with privileged processes. Breeze reads them through its cooling helper while it’s connected.", systemImage: "lock")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        if let connect = model.connectHelper {
+                            Button("Connect helper") { connect() }.breezeAction(size: .small)
+                        }
+                    }
+                }
+                Text("GPU energy and frequency residency come from the chip’s IOReport counters, the same source as powermetrics; whole-Mac power comes from the SMC. Frequency is the average while active.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(model.latest == nil ? "Reading power counters…" : "Power and frequency counters are unavailable on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(20).activitySurface()
+    }
+    private func watts(_ value: Double) -> String { String(format: value < 10 ? "%.2f W" : "%.1f W", max(0, value)) }
+    private func mhz(_ value: Double?) -> String { value.map { "\(Int($0.rounded())) MHz" } ?? "—" }
+    private func cluster(_ frequency: Double?, _ active: Double?) -> String {
+        [frequency.map { "\(Int($0.rounded())) MHz" }, active.map { "\(Int(($0 * 100).rounded()))% active" }]
+            .compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "—"
     }
 
     private var gpu: some View {
@@ -132,6 +181,12 @@ struct ActivityView<Thermal: View>: View {
                             if let cores = gpu.cores { Text("\(cores) cores").font(.caption).foregroundStyle(.secondary) }
                         }
                         utilization("GPU utilization", value: gpu.utilization, color: accent)
+                        if let power = model.latest?.power {
+                            HStack(spacing: 20) {
+                                valueRow("GPU power", value: watts(power.gpuWatts))
+                                valueRow("GPU frequency", value: mhz(power.gpuMHz))
+                            }
+                        }
                         HStack(spacing: 20) {
                             utilization("Renderer", value: gpu.renderer, color: .blue)
                             utilization("Tiler", value: gpu.tiler, color: .purple)
@@ -148,7 +203,10 @@ struct ActivityView<Thermal: View>: View {
                     description: Text("This Mac’s graphics driver is not exposing utilization counters."))
                     .frame(minHeight: 260).frame(maxWidth: .infinity).activitySurface()
             }
-            Label("System-wide FPS and Neural Engine utilization are not available from this monitor. GPU counters depend on your Mac’s graphics driver.", systemImage: "info.circle")
+            if model.latest?.power != nil {
+                historyChart("GPU power", color: .purple, unit: "W", maximum: nil, value: { $0.power?.gpuWatts })
+            }
+            Label("System-wide FPS is not available from this monitor. Neural Engine activity appears as power on the CPU tab. GPU counters depend on your Mac’s graphics driver.", systemImage: "info.circle")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -314,4 +372,8 @@ extension View {
     fileprivate func activitySurface() -> some View {
         breezeSurface(radius: 18)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

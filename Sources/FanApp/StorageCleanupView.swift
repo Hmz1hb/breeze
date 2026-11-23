@@ -45,6 +45,7 @@ struct StorageCleanupView: View {
     @Bindable var model: StorageCleanupModel
     @State private var showingFolders = false
     @State private var showingIssues = false
+    @AppStorage("cleanupAssistantClient") private var assistantClient = "codex"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -221,7 +222,7 @@ struct StorageCleanupView: View {
                     Button("\(inventory.issues.count) scan notes") { showingIssues = true }
                 }
             }
-            DisclosureGroup("AI priorities (optional)") {
+            BreezeDisclosure("AI priorities (optional)") {
                 TextField("For example: reclaim 30 GB; keep my current iOS device and local models", text: $model.assistantGoal, axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.roundedBorder).disabled(model.assistantRunning)
             }.font(.caption)
@@ -363,7 +364,16 @@ struct StorageCleanupView: View {
                 Spacer(minLength: 8)
                 Button { model.showingAssistant = true } label: { Image(systemName: "slider.horizontal.3") }
                     .help("AI options and assistant preference").accessibilityLabel("AI options")
-                Button("Ask AI", systemImage: "sparkles") { model.askAssistant() }
+                // Click runs the saved assistant; the arrow switches it.
+                Menu {
+                    Picker("Assistant", selection: $assistantClient) {
+                        ForEach(CleanupAssistantClient.allCases, id: \.rawValue) { Text($0.name).tag($0.rawValue) }
+                    }.pickerStyle(.inline)
+                } label: {
+                    Label("Ask \(CleanupAssistantClient.detected(preferred: assistantClient)?.name ?? "AI")", systemImage: "sparkles")
+                } primaryAction: { model.askAssistant() }
+                    .fixedSize()
+                    .help("Click to analyze. Use the arrow to choose Codex or Claude Code.")
                     .disabled(model.busy || model.assistantRunning || model.requiresRescan)
                 Button("Review selection", systemImage: "arrow.right") { model.prepareReview() }
                     .breezeAction(prominent: true).disabled(model.selected.isEmpty || model.busy || model.requiresRescan)

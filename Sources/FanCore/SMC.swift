@@ -162,4 +162,33 @@ public final class SMC {
         }
         guard failures.isEmpty else { throw FanError(failures.joined(separator: " ")) }
     }
+
+    public private(set) var chargingInhibited = false
+
+    /// Apple silicon firmware since macOS 15 uses CHTE (4 bytes); earlier firmware uses CH0B/CH0C (1 byte).
+    /// Writes raw bytes because these keys are flags, not numbers, and verifies each readback.
+    public func setCharging(allowed: Bool) throws {
+        var writes: [(String, [UInt8])] = []
+        if let (_, bytes) = try? raw("CHTE"), bytes.count == 4 {
+            writes = [("CHTE", [allowed ? 0 : 1, 0, 0, 0])]
+        } else if let (_, bytes) = try? raw("CH0B"), bytes.count == 1 {
+            writes = [("CH0B", [allowed ? 0 : 2])]
+            if let (_, other) = try? raw("CH0C"), other.count == 1 { writes.append(("CH0C", [allowed ? 0 : 2])) }
+        } else {
+            throw FanError("This Mac’s firmware doesn’t expose a supported charging control.")
+        }
+        if !allowed { chargingInhibited = true } // Include partial writes in restoration.
+        for (key, value) in writes {
+            try WriteVerification.apply(attempts: 3, write: {
+                let result = breeze_smc_write(self.connection, key, UInt32(value.count), value)
+                guard result == 0 else { throw FanError("AppleSMC rejected \(key) (\(result)).") }
+            }, matches: { (try? self.raw(key))?.1 == value }, pause: { usleep(100_000) })
+        }
+        chargingInhibited = !allowed
+    }
+
+    public func restoreCharging() throws {
+        guard chargingInhibited else { return }
+        try setCharging(allowed: true)
+    }
 }

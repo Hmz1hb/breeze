@@ -158,6 +158,15 @@ enum CleanupTools {
         }
     }
 
+    /// Untagged images show as `<none>:<none>` in Docker; name them by short ID and age instead.
+    static func dockerImageTitle(_ image: [String: Any], id: String) -> String {
+        let repository = image["Repository"] as? String ?? "<none>", tag = image["Tag"] as? String ?? "<none>"
+        if repository != "<none>" { return tag == "<none>" ? "\(repository) (untagged)" : "\(repository):\(tag)" }
+        let shortID = String(id.split(separator: ":").last ?? Substring(id)).prefix(12)
+        let age = (image["CreatedSince"] as? String).map { " · created \($0)" } ?? ""
+        return "Untagged image · \(shortID)\(age)"
+    }
+
     static func docker() async throws -> CleanupToolInventory {
         guard let executable = dockerExecutable else { return CleanupToolInventory(issues: ["Docker CLI not installed; Docker cleanup was skipped."]) }
         var result = CleanupToolInventory()
@@ -173,9 +182,7 @@ enum CleanupTools {
             var seen: Set<String> = []
             for image in try rows(data) {
                 guard let id = image["ID"] as? String, validImageID(id), seen.insert(id).inserted else { continue }
-                let repository = image["Repository"] as? String ?? "<none>"
-                let tag = image["Tag"] as? String ?? "<none>"
-                result.entries.append(entry(id: "docker:\(context):\(id)", title: "\(repository):\(tag)", category: .docker, risk: .review,
+                result.entries.append(entry(id: "docker:\(context):\(id)", title: dockerImageTitle(image, id: id), category: .docker, risk: .review,
                     detail: "Docker image \(id) in local context \(context). Size includes shared layers and is an upper estimate. Removal is refused if containers or multiple tags still need it; Breeze never forces removal, deletes containers or touches volumes.",
                     recovery: "Pull or rebuild the image. A local-only image may not be reproducible.",
                     action: .dockerImage(context: context, endpoint: endpoint, id: id), bytes: parseSize(image["Size"] as? String ?? "")))

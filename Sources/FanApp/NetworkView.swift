@@ -38,7 +38,9 @@ struct NetworkView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     route
-                    if model.tab == .activity {
+                    if model.tab == .apps {
+                        appInventory
+                    } else if model.tab == .activity {
                         speedTest
                         traffic
                         health
@@ -52,7 +54,7 @@ struct NetworkView: View {
             Divider()
             HStack(spacing: 8) {
                 Image(systemName: "network").foregroundStyle(networkMint)
-                Text(model.tab == .activity ? "Traffic every 1s · connection details every 5s" : "Discovery stays on your local network")
+                Text(model.tab == .activity ? "Traffic every 1s · connection details every 5s" : model.tab == .apps ? "Per-app traffic since Breeze opened · every 1s" : "Discovery stays on your local network")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer(minLength: 8)
                 Toggle("Internet checks", isOn: $model.internetChecks).toggleStyle(.switch).controlSize(.mini)
@@ -72,7 +74,7 @@ struct NetworkView: View {
             Spacer()
             Picker("Network view", selection: $model.tab) {
                 ForEach(NetworkModel.Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 180)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 250)
         }.padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 24)
     }
 
@@ -300,6 +302,69 @@ struct NetworkView: View {
             Spacer(minLength: 0)
             Text(value ?? "—").multilineTextAlignment(.trailing).textSelection(.enabled)
         }.font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var appInventory: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Apps using the network").font(.title3.weight(.semibold))
+                    Text(model.appUsageSince.map { "Totals since \($0.formatted(date: .omitted, time: .shortened)) · current rates" } ?? "Reading per-app traffic…")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Reset totals", systemImage: "arrow.counterclockwise") { model.resetAppUsage() }
+                    .disabled(model.appUsage.isEmpty)
+            }
+            if let error = model.appUsageError {
+                Label(error, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+            }
+            let rows = Array(model.sortedAppUsage.prefix(40))
+            if rows.isEmpty {
+                VStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for network activity…").font(.caption).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity).padding(.vertical, 48).networkPanel()
+            } else {
+                LazyVStack(spacing: 0) {
+                    HStack {
+                        Text("Process"); Spacer()
+                        Text("Download").frame(width: 92, alignment: .trailing)
+                        Text("Upload").frame(width: 92, alignment: .trailing)
+                        Text("Total").frame(width: 92, alignment: .trailing)
+                    }.font(.caption2.weight(.medium)).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 10)
+                    ForEach(rows) { usage in appRow(usage) }
+                }.networkPanel()
+            }
+            Text("Includes local and loopback traffic. Processes are listed by name and PID; helper processes appear separately from their app. Totals count every connection since Breeze opened, including ones that have already closed, and are not saved. Traffic from before Breeze opened is not included.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    /// Live rate over the session total for one direction, so finished transfers stay visible.
+    private func directionCell(rate: Double, total: UInt64, color: Color) -> some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text(networkRate(rate)).foregroundStyle(rate > 0 ? color : .secondary)
+            Text(networkBytes(total)).font(.caption2).foregroundStyle(.secondary)
+        }.frame(width: 92, alignment: .trailing)
+    }
+    private func appRow(_ usage: AppNetworkUsage) -> some View {
+        let app = NSRunningApplication(processIdentifier: usage.pid)
+        return HStack(spacing: 12) {
+            Group {
+                if let icon = app?.icon { Image(nsImage: icon).resizable() }
+                else { Image(systemName: "terminal").foregroundStyle(.secondary) }
+            }.frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app?.localizedName ?? usage.name).font(.subheadline).lineLimit(1)
+                Text("PID \(usage.pid)").font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            }
+            Spacer(minLength: 8)
+            directionCell(rate: usage.download, total: usage.received, color: networkMint)
+            directionCell(rate: usage.upload, total: usage.sent, color: networkSlate)
+            Text(networkBytes(usage.received + usage.sent)).frame(width: 92, alignment: .trailing)
+        }.font(.system(size: 12)).monospacedDigit().padding(.horizontal, 16).padding(.vertical, 8)
+            .overlay(alignment: .bottom) { Divider().opacity(0.4).padding(.leading, 50) }
+            .accessibilityElement(children: .combine)
     }
 
     private var deviceInventory: some View {

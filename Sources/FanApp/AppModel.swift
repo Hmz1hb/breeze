@@ -4,6 +4,7 @@ import FanCore
 import Foundation
 import Observation
 import ServiceManagement
+import WidgetKit
 
 @MainActor @Observable
 final class AppModel {
@@ -29,6 +30,22 @@ final class AppModel {
     var savedProfiles: [SavedCoolingProfile]
     var boostEndsAt: Date?
     var page = Page.overview
+    var charge: ChargeConfiguration {
+        didSet { if let data = try? JSONEncoder().encode(charge) { preferences.set(data, forKey: "chargeConfiguration") } }
+    }
+    var chargeStatus: String?
+    var chargingPaused = false
+    var automationEnabled: Bool {
+        didSet {
+            preferences.set(automationEnabled, forKey: "automationEnabled")
+            if !automationEnabled { Task { await leaveAutomation() } }
+        }
+    }
+    var automationRules: [AutomationRule] {
+        didSet { if let data = try? JSONEncoder().encode(automationRules) { preferences.set(data, forKey: "automationRules") } }
+    }
+    private(set) var activeAutomationRule: UUID?
+    var automationStatus: String?
     var widgetPreferences: WidgetPreferences {
         didSet {
             if let data = try? JSONEncoder().encode(widgetPreferences) {
@@ -44,19 +61,26 @@ final class AppModel {
     let activity = ActivityModel()
     let macInfo = MacInfoModel()
     let battery = BatteryModel()
+    let deviceBatteries = DeviceBatteryModel()
+    let alerts: AlertCenter
+    let checkup = CheckupModel()
     private let monitor = Monitor()
     private let session: any CoolingSession
     private let preferences: UserDefaults
     private var loop: Task<Void, Never>?
     private var widgetLoop: Task<Void, Never>?
     private var widgetStorageLoop: Task<Void, Never>?
+    private var devicesLoop: Task<Void, Never>?
+    private var appTrafficLoop: Task<Void, Never>?
+    private var ticks = 0
     private var observers: [NSObjectProtocol] = []
     private var appliedConfiguration: CoolingConfiguration?
     enum Page: String, CaseIterable {
-        case overview = "Overview", cooling = "Cooling", statistics = "Statistics", battery = "Battery", storage = "Storage", network = "Network", mac = "This Mac", settings = "Settings"
+        case overview = "Overview", checkup = "Checkup", cooling = "Cooling", statistics = "Statistics", battery = "Battery", storage = "Storage", network = "Network", mac = "This Mac", settings = "Settings"
         var symbol: String {
             switch self {
             case .overview: "square.grid.2x2"
+            case .checkup: "stethoscope"
             case .cooling: "fanblades"
             case .statistics: "waveform.path.ecg"
             case .battery: "battery.100percent"
@@ -87,6 +111,13 @@ final class AppModel {
         resumeOnWake = defaults.object(forKey: "resumeOnWake") as? Bool ?? true
         applyAtLaunch = defaults.bool(forKey: "applyAtLaunch")
         savedProfiles = SavedCoolingProfile.load(from: defaults.data(forKey: "savedCoolingProfiles"))
+        if let data = defaults.data(forKey: "chargeConfiguration"),
+           let saved = try? JSONDecoder().decode(ChargeConfiguration.self, from: data), (try? saved.validate()) != nil {
+            charge = saved
+        } else { charge = ChargeConfiguration() }
+        automationEnabled = defaults.bool(forKey: "automationEnabled")
+        automationRules = AutomationRule.load(from: defaults.data(forKey: "automationRules"))
+        alerts = AlertCenter(defaults: defaults)
     }
     var visibleHistory: [Sample] {
         // Compare seconds directly: the 27.2 SDK's back-deployed Date >= / <=
@@ -145,6 +176,7 @@ final class AppModel {
     }
     func start() {
         guard loop == nil else { return }
+        activity.connectHelper = { [weak self] in Task { await self?.enable() } }
         widgetStorageLoop = Task { [weak self, widgetStorage] in
             await widgetStorage.run(when: { [weak self] in
                 guard let self, !self.sleeping else { return false }
@@ -162,6 +194,14 @@ final class AppModel {
                 return self.widgetObservers > 0 && self.widgetPreferences.sections.contains(.processes)
             })
         }
+        devicesLoop = Task { [weak self, deviceBatteries] in
+            await deviceBatteries.run(when: { [weak self] in
+                guard let self, !self.sleeping else { return false }
+                return self.page == .battery || (self.widgetObservers > 0 && self.widgetPreferences.sections.contains(.devices))
+            }, announce: { [weak self] in self?.page != .battery })
+        }
+        // Per-app totals cover the whole session, not just the time the Network page is open.
+        appTrafficLoop = Task { [network] in await network.monitorApps() }
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in await self?.willSleep() }
@@ -190,11 +230,16 @@ final class AppModel {
                         do { consume(try await session.request(Command(.heartbeat))) }
                         catch { disconnected(error) }
                     }
+                    ticks += 1
+                    if ticks % 3 == 0 { await evaluateAutomation() }
+                    if ticks % 60 == 1 { await publishWidgetSnapshot() }
+                    await alerts.evaluate(hottest: snapshot?.hottest)
                 }
                 try? await Task.sleep(for: .seconds(1))
             }
         }
         if applyAtLaunch { Task { await apply() } }
+        else if charge.isActive { Task { await applyCharge() } }
     }
     func enable() async {
         guard !busy else { return }
@@ -214,6 +259,23 @@ final class AppModel {
         let reply = try await session.enable()
         enabled = true
         consume(reply)
+        // Each new helper session starts with charging under macOS control.
+        if charge.isActive { consume(try await session.request(Command(.charge, charge: charge))) }
+    }
+    /// Starts, updates or stops the helper's charge limiter. Connecting is needed only to turn it on.
+    func applyCharge() async {
+        guard !busy else { return }
+        busy = true; message = nil
+        defer { busy = false }
+        do {
+            try charge.validate()
+            if !enabled {
+                guard charge.isActive else { chargeStatus = nil; chargingPaused = false; return }
+                try await connect() // connect() sends the charge configuration.
+                return
+            }
+            consume(try await session.request(Command(.charge, charge: charge)))
+        } catch { message = error.localizedDescription }
     }
     func apply() async {
         if await applyConfiguration(configuration, persist: true) { boostEndsAt = nil }
@@ -253,7 +315,10 @@ final class AppModel {
         var profile = configuration
         profile.mode = .automatic
         // Keep the deadline on failure so the monitoring loop retries restoration.
-        if await applyConfiguration(profile, persist: false) { boostEndsAt = nil }
+        if await applyConfiguration(profile, persist: false) {
+            boostEndsAt = nil
+            activeAutomationRule = nil // Let a matching switching rule take over again.
+        }
     }
     func finishExpiredBoost(now: Date = .now) async {
         guard let boostEndsAt, boostEndsAt.timeIntervalSince(now) <= 0, !busy else { return }
@@ -271,6 +336,9 @@ final class AppModel {
         await apply()
     }
     private func consume(_ reply: Reply) {
+        chargeStatus = reply.charging
+        chargingPaused = reply.chargingPaused ?? false
+        if let power = reply.power { activity.helperPower = (power, Date()) }
         manual = reply.manual
         appliedPercent = reply.percent
         activeMode = reply.mode
@@ -282,6 +350,7 @@ final class AppModel {
         if boostEndsAt != nil { appliedConfiguration = nil }
         boostEndsAt = nil
         enabled = false; manual = false; appliedPercent = nil; boosted = false; activeMode = .automatic
+        chargeStatus = nil; chargingPaused = false
         message = error.localizedDescription
         controllerMessage = "Control connection lost. Check the live fan modes below."
     }
@@ -341,12 +410,83 @@ final class AppModel {
         boostEndsAt = nil
         await session.stop()
         enabled = false; manual = false; appliedPercent = nil; activeMode = .automatic; boosted = false
+        chargeStatus = nil; chargingPaused = false
     }
     func quit() async {
         loop?.cancel()
         widgetLoop?.cancel()
         widgetStorageLoop?.cancel()
+        devicesLoop?.cancel()
+        appTrafficLoop?.cancel()
         await disable()
         NSApplication.shared.reply(toApplicationShouldTerminate: true)
+    }
+
+    // MARK: Automatic switching
+
+    /// The profile you last applied yourself, used when no rule matches.
+    private var baseProfile: CoolingConfiguration {
+        if let data = preferences.data(forKey: "coolingProfile"),
+           let saved = try? JSONDecoder().decode(CoolingConfiguration.self, from: data) { return saved }
+        var automatic = CoolingConfiguration(); automatic.mode = .automatic
+        return automatic
+    }
+    func evaluateAutomation() async {
+        guard automationEnabled, boostEndsAt == nil, !busy, !sleeping, snapshot?.canControl == true else { return }
+        let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
+        let now = Calendar.current.dateComponents([.hour, .minute], from: .now)
+        let minute = (now.hour ?? 0) * 60 + (now.minute ?? 0)
+        let match = automationRules.first { $0.matches(runningApps: running, onBattery: AutomationRule.onBattery, minute: minute) }
+        guard match?.id != activeAutomationRule else { return }
+        // Record the transition first so an unavailable helper isn't retried every few seconds.
+        activeAutomationRule = match?.id
+        if let match {
+            automationStatus = "\(match.title) · \(match.profileName)"
+            await applyConfiguration(match.configuration, persist: false)
+        } else {
+            automationStatus = nil
+            await applyConfiguration(baseProfile, persist: false)
+        }
+    }
+    private func leaveAutomation() async {
+        guard activeAutomationRule != nil else { return }
+        activeAutomationRule = nil; automationStatus = nil
+        if boostEndsAt == nil { await applyConfiguration(baseProfile, persist: false) }
+    }
+    func addAutomationRule(_ rule: AutomationRule) {
+        guard automationRules.count < 24 else { return }
+        automationRules.append(rule)
+        if !automationEnabled { automationEnabled = true }
+    }
+    func removeAutomationRule(_ id: UUID) {
+        automationRules.removeAll { $0.id == id }
+        if activeAutomationRule == id { Task { await leaveAutomation() } }
+    }
+    func moveAutomationRule(_ id: UUID, up: Bool) {
+        guard let index = automationRules.firstIndex(where: { $0.id == id }) else { return }
+        let target = up ? index - 1 : index + 1
+        guard automationRules.indices.contains(target) else { return }
+        automationRules.swapAt(index, target)
+    }
+
+    // MARK: Desktop widget
+
+    /// Writes the shared status file about once a minute. WidgetKit budgets reloads,
+    /// so timelines are requested at most every 15 minutes; the widget shows its update time.
+    private func publishWidgetSnapshot() async {
+        guard WidgetSnapshot.fileURL != nil else { return }
+        var value = WidgetSnapshot()
+        value.status = statusTitle
+        value.temperature = snapshot?.hottest
+        value.fanRPM = snapshot?.fans.map(\.current).max()
+        value.fanCount = snapshot?.fans.count ?? 0
+        value.cpuPercent = systemStats?.cpuPercent
+        if let stats = systemStats, stats.memoryTotal > 0 { value.memoryPercent = Double(stats.memoryUsed) / Double(stats.memoryTotal) * 100 }
+        let battery = await BatteryReader.read()
+        value.batteryPercent = battery.percent
+        value.charging = chargeStatus
+        if let space = DiskSpace.startup() { value.diskFree = space.free; value.diskTotal = space.total }
+        try? value.save()
+        if ticks % 900 == 1 { WidgetCenter.shared.reloadAllTimelines() }
     }
 }

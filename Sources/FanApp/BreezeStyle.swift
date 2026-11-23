@@ -162,3 +162,23 @@ extension View {
         modifier(BreezeActionStyle(prominent: prominent, size: size))
     }
 }
+
+/// A disclosure group whose title text also toggles it, not just the arrow.
+struct BreezeDisclosure<Content: View>: View {
+    private let title: String
+    private let content: Content
+    @State private var expanded = false
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) { content } label: {
+            Button(title) { withAnimation(.snappy(duration: 0.2)) { expanded.toggle() } }
+                .buttonStyle(.plain)
+                .accessibilityHidden(true) // the group itself is the accessible toggle
+        }
+    }
+}

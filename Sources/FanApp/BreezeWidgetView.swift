@@ -52,6 +52,7 @@ struct BreezeWidgetView: View {
                     if preferences.sections.contains(.storage) { storageDetails }
                     if preferences.sections.contains(.sensors) { sensorDetails }
                     if preferences.sections.contains(.processes) { topProcesses }
+                    if preferences.sections.contains(.devices) { deviceBatteries }
                     if preferences.sections.contains(.controls) { coolingControls }
                     if let message = model.message {
                         notice(message, symbol: "info.circle")
@@ -333,7 +334,7 @@ struct BreezeWidgetView: View {
             valueRow("CPU die", value: model.sleeping ? "—" : degrees(model.snapshot?.cpuTemperature))
             valueRow("GPU die", value: model.sleeping ? "—" : degrees(model.snapshot?.gpuTemperature))
             if let sensors = model.snapshot?.temperatures, !sensors.isEmpty, !model.sleeping {
-                DisclosureGroup("Die sensors · \(sensors.count) readings") {
+                BreezeDisclosure("Die sensors · \(sensors.count) readings") {
                     VStack(spacing: 8) {
                         ForEach(sensors, id: \.key) { sensor in
                             valueRow(sensor.key, value: String(format: "%.1f°C", sensor.celsius))
@@ -363,6 +364,30 @@ struct BreezeWidgetView: View {
                 }
                 Text("CPU is per core; a process can exceed 100%.")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }.padding(12).widgetInset()
+    }
+
+    private var deviceBatteries: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Devices", detail: "BATTERY")
+            if let device = model.deviceBatteries.needsAccess.first, !model.deviceBatteries.accessDismissed {
+                Button { showApp(.battery) } label: {
+                    Label("Show \(device) battery…", systemImage: "computermouse").lineLimit(1)
+                }.buttonStyle(.link).font(.system(size: 10))
+            }
+            if model.deviceBatteries.devices.isEmpty {
+                waiting(model.deviceBatteries.updated == nil ? "Looking for Bluetooth devices…" : "No connected device reports a battery level.")
+            } else {
+                ForEach(model.deviceBatteries.devices) { device in
+                    HStack(spacing: 8) {
+                        Image(systemName: device.symbol).foregroundStyle(BreezeStyle.blue).frame(width: 16)
+                        Text(device.name).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Text(device.levels.map { ($0.label.isEmpty ? "" : "\($0.label.prefix(1)) ") + "\($0.percent)%" }.joined(separator: "  "))
+                            .monospacedDigit().foregroundStyle((device.lowest ?? 100) <= 20 ? .orange : .primary)
+                    }.font(.system(size: 10))
+                }
             }
         }.padding(12).widgetInset()
     }

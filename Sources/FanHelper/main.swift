@@ -2,8 +2,16 @@ import CHardware
 import Darwin
 import FanCore
 import Foundation
+import os
 
-func report(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
+// launchd discards the daemon's stderr; the unified log keeps restoration failures visible:
+// log show --predicate 'subsystem == "local.breeze.fancontrol.helper"' --last 1h
+private let logger = Logger(subsystem: "local.breeze.fancontrol.helper", category: "helper")
+
+func report(_ text: String) {
+    logger.error("\(text, privacy: .public)")
+    FileHandle.standardError.write(Data((text + "\n").utf8))
+}
 
 func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     let smc = try SMC()
@@ -12,6 +20,14 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
             do { try smc.restoreAutomatic(); break }
             catch {
                 report("Restoring Apple automatic control (attempt \(attempt+1)): \(error.localizedDescription)")
+                usleep(200_000)
+            }
+        }
+        // Never leave charging disabled after the session that requested it ends.
+        for attempt in 0..<10 {
+            do { try smc.restoreCharging(); break }
+            catch {
+                report("Re-enabling charging (attempt \(attempt+1)): \(error.localizedDescription)")
                 usleep(200_000)
             }
         }
@@ -26,6 +42,43 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     var status = "macOS manages cooling."
     var healthy = true
     var last = breeze_continuous_time()
+    let powerReader = breeze_power_open()
+    defer { breeze_power_close(powerReader) }
+    var power: PrivilegedPower?
+    var lastPower = 0.0
+    func samplePower() {
+        let now = breeze_continuous_time()
+        guard let powerReader, now - lastPower >= 1 else { return }
+        lastPower = now
+        var raw = BreezePower()
+        let result = breeze_power_sample(powerReader, &raw)
+        if result == 0 { power = raw.cpu_watts > 0 ? PrivilegedPower(cpuWatts: raw.cpu_watts, aneWatts: raw.ane_watts, dramWatts: raw.dram_watts) : nil }
+        else if result < 0 { power = nil }
+    }
+    var charger: ChargeController?
+    var chargeStatus: String?
+    var lastCharge = 0.0
+
+    func applyCharging(force: Bool = false) {
+        guard var active = charger else { return }
+        let now = breeze_continuous_time()
+        guard force || now - lastCharge >= 5 else { return }
+        lastCharge = now
+        let decision = active.next(BatteryState.read())
+        charger = active
+        do {
+            if decision.allow == smc.chargingInhibited { try smc.setCharging(allowed: decision.allow) }
+            chargeStatus = decision.message
+        } catch {
+            // A failed charging write disables the limiter rather than retrying a contested key.
+            charger = nil
+            do { try smc.restoreCharging(); chargeStatus = "\(error.localizedDescription) Charging is allowed." }
+            catch let restore {
+                chargeStatus = "\(error.localizedDescription) Re-enabling charging failed: \(restore.localizedDescription)"
+                report(chargeStatus ?? "")
+            }
+        }
+    }
 
     func applyController() throws {
         guard !suspended, configuration.mode != .automatic else { return }
@@ -53,7 +106,8 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     }
     func reply() -> Reply {
         Reply(ok: healthy, message: status, manual: smc.hasOverrides, percent: applied,
-              boosted: boosted, suspended: suspended, mode: configuration.mode)
+              boosted: boosted, suspended: suspended, mode: configuration.mode,
+              charging: chargeStatus, chargingPaused: smc.chargingInhibited, power: power)
     }
 
     while true {
@@ -73,6 +127,18 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
             do {
                 switch command.action {
                 case .heartbeat: break
+                case .charge:
+                    // Charging errors never disturb an active cooling profile.
+                    if let next = command.charge, next.isActive {
+                        if let valid = try? ChargeController(configuration: next) {
+                            charger = valid
+                            applyCharging(force: true)
+                        } else { chargeStatus = "Invalid charging settings were ignored." }
+                    } else {
+                        charger = nil
+                        do { try smc.restoreCharging(); chargeStatus = nil }
+                        catch { chargeStatus = "Re-enabling charging failed: \(error.localizedDescription)"; report(chargeStatus ?? "") }
+                    }
                 case .configure, .manual:
                     var next: CoolingConfiguration
                     if command.action == .manual {
@@ -109,12 +175,16 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                 }
                 try applyController()
             } catch { fail(error) }
+            applyCharging()
+            samplePower()
             try Wire.send(reply(), to: fd)
             last = breeze_continuous_time()
             if command.action == .quit { return }
         } else {
             do { try applyController() }
             catch { fail(error) }
+            applyCharging()
+            samplePower()
         }
     }
 

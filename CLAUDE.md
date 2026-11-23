@@ -23,16 +23,17 @@ zsh scripts/verify-helper-transport.sh   # signed-process socket auth fixture (T
 dist/Breeze.app/Contents/MacOS/BreezeHelper --status
 ```
 
-Launch flags for jumping to a page: `--statistics`, `--processes`, `--network`, `--this-mac`, `--battery`, `--scan-folder /abs/path` (handled in `Sources/FanApp/BreezeApp.swift`).
+Launch flags for jumping to a page: `--statistics`, `--processes`, `--network`, `--this-mac`, `--battery`, `--checkup`, `--scan-folder /abs/path` (handled in `Sources/FanApp/BreezeApp.swift`).
 
 Helper approval (SMAppService) only works from the signed, packaged app. Ad-hoc signing is not supported.
 
 ## Architecture
 
-Three executables built from shared library targets (`Package.swift`):
+Four executables built from shared library targets (`Package.swift`):
 
 - **Breeze** (`FanApp`): the unprivileged SwiftUI app. `AppModel` owns the per-feature models (`*Model.swift`), and each model has a matching `*View.swift`. `BreezeMenuBarController` and `BreezeWidgetView` run the menu-bar widget. Shared visual style lives in `BreezeStyle.swift`.
 - **BreezeHelper** (`FanHelper`): the root LaunchDaemon that does all SMC fan writes. It is registered via `SMAppService` using `scripts/local.breeze.fancontrol.helper.plist` and bundled at `Contents/MacOS/BreezeHelper`.
+- **BreezeWidgets**: the sandboxed WidgetKit extension, packaged by `scripts/build.sh` as `Contents/PlugIns/BreezeWidgets.appex`. It reads `WidgetSnapshot` (FanCore) from the team-prefixed app group the app writes to.
 - **BreezeMCP**: a standalone MCP stdio server that exposes the cleanup inventory to Codex/Claude Code (four tools: `cleanup_summary`, `list_items`, `inspect_items`, `propose_cleanup`).
 
 Library targets:
@@ -46,6 +47,8 @@ Library targets:
 ### Fan control flow
 
 App `ControlSession` (actor) → `breeze_connect` to the launchd socket in `/var/run` → verifies the peer is root → exchanges `Command`/`Reply` JSON. The helper authenticates the client by audit token, the exact signing identifier `local.breeze.fancontrol`, and its own team. The helper runs the cooling controller loop itself, independently of the UI, and restores Apple automatic mode on quit, disconnect, a 6s heartbeat timeout, or an error. Sleep is an explicit paused state.
+
+The helper also runs the charge limiter (`ChargeController` in `FanCore/Charging.swift`, `.charge` command) and re-enables charging whenever the session ends.
 
 Safety invariants to preserve: heat never releases an override (it boosts to 100% instead), firmware readback is verified, fixed 0% is the reported minimum (never stopped), and there is only one control session at a time. `Monitor` in `ControlSession.swift` does unprivileged read-only SMC sampling for the UI.
 
