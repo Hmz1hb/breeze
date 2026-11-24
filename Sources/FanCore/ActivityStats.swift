@@ -5,7 +5,8 @@ import IOKit
 public struct CPUActivity: Sendable {
     public let user: Double
     public let system: Double
-    public var used: Double { user + system }
+    /// Clamped: with zero idle ticks, floating-point rounding can put the sum just past 100.
+    public var used: Double { min(100, user + system) }
     public var idle: Double { max(0, 100 - used) }
 
     /// Mach CPU counters are wrapping 32-bit ticks. A first sample has no interval.
