@@ -8,63 +8,76 @@ import SwiftUI
 struct ActivityView<Thermal: View>: View {
     @Bindable var model: ActivityModel
     let thermal: Thermal
-    private let accent = Color(red: 0.22, green: 0.67, blue: 0.55)
+    @State private var scrolled = false
+    /// One scrub date shared by every chart of the visible tab.
+    @State private var scrub: Date?
+    private let accent = BreezeStyle.mint
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Statistics").font(.system(size: 28, weight: .semibold, design: .rounded))
-                    Text("A closer look at what’s keeping your Mac busy.")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer()
+        VStack(alignment: .leading, spacing: 0) {
+            BreezePageHeader("Statistics", subtitle: "A closer look at what’s keeping your Mac busy.", scrolled: scrolled) {
                 Button { model.paused.toggle() } label: {
-                    Label(model.paused ? "Resume" : "Pause", systemImage: model.paused ? "play.fill" : "pause.fill")
+                    Label {
+                        Text(model.paused ? "Resume" : "Pause")
+                    } icon: {
+                        Image(systemName: model.paused ? "play.fill" : "pause.fill")
+                            .contentTransition(.symbolEffect(.replace))
+                    }
                 }.help(model.paused ? "Resume live readings" : "Pause live readings")
+                    .breezeAnimation(.settle, value: model.paused)
             }
-            HStack(spacing: 16) {
-                Picker("Resource", selection: $model.tab) {
-                    ForEach(ActivityModel.Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(maxWidth: 480)
-                Spacer(minLength: 0)
-                if model.tab != .processes && model.tab != .thermal {
-                    Picker("History", selection: $model.windowSeconds) {
-                        Text("2 minutes").tag(120)
-                        Text("5 minutes").tag(300)
-                        Text("10 minutes").tag(600)
-                    }.frame(width: 145)
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(spacing: 16) {
+                    Picker("Resource", selection: $model.tab) {
+                        ForEach(ActivityModel.Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }.pickerStyle(.segmented).frame(maxWidth: 480)
+                    Spacer(minLength: 0)
+                    if model.tab != .processes && model.tab != .thermal {
+                        Picker("History", selection: $model.windowSeconds) {
+                            Text("2 minutes").tag(120)
+                            Text("5 minutes").tag(300)
+                            Text("10 minutes").tag(600)
+                        }.frame(width: 145)
+                    }
                 }
+                BreezeSwitcher(model.tab, index: ActivityModel.Tab.allCases.firstIndex(of: model.tab) ?? 0) { tabContent }
+                HStack(spacing: 6) {
+                    Circle().fill(model.paused ? Color.orange : accent).frame(width: 6, height: 6)
+                    Text(model.paused ? "Paused" : "Updates every 2 seconds").contentTransition(.opacity)
+                    if let date = model.latest?.date {
+                        Text("·"); Text(date, style: .time).breezeLive()
+                    }
+                    Spacer()
+                    Text("History stays on this Mac for this session.")
+                }.font(.caption2).foregroundStyle(.secondary)
+                    .breezeAnimation(.settle, value: model.paused)
             }
-            if model.tab == .processes {
-                ActivityProcessesView(model: model)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        switch model.tab {
-                        case .cpu: cpu
-                        case .gpu: gpu
-                        case .memory: memory
-                        case .thermal: thermal
-                        case .processes: EmptyView()
-                        }
-                    }.padding(.bottom, 4)
-                }
-            }
-            HStack(spacing: 6) {
-                Circle().fill(model.paused ? Color.orange : accent).frame(width: 6, height: 6)
-                Text(model.paused ? "Paused" : "Updates every 2 seconds")
-                if let date = model.latest?.date {
-                    Text("·"); Text(date, style: .time).monospacedDigit()
-                }
-                Spacer()
-                Text("History stays on this Mac for this session.")
-            }.font(.caption2).foregroundStyle(.secondary)
+            .padding(.horizontal, BreezeStyle.pagePadding).padding(.bottom, 18)
         }
-        .padding(.horizontal, 26).padding(.top, 30).padding(.bottom, 18)
+        .onChange(of: model.tab) { scrolled = false; scrub = nil }
         .task { await model.run() }
     }
+
+    @ViewBuilder private var tabContent: some View {
+        if model.tab == .processes {
+            ActivityProcessesView(model: model)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    switch model.tab {
+                    case .cpu: cpu.breezeChartKeys($scrub, dates: sampleDates)
+                    case .gpu: gpu.breezeChartKeys($scrub, dates: sampleDates)
+                    case .memory: memory.breezeChartKeys($scrub, dates: sampleDates)
+                    case .thermal: thermal
+                    case .processes: EmptyView()
+                    }
+                }.padding(.bottom, 4).breezeScrollEdge($scrolled)
+            }
+        }
+    }
+
+    private var sampleDates: [Date] { model.samples.map(\.date) }
 
     private var cpu: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -79,7 +92,9 @@ struct ActivityView<Thermal: View>: View {
                     GeometryReader { proxy in
                         HStack(spacing: 0) {
                             Rectangle().fill(Color.blue).frame(width: proxy.size.width * (model.latest?.cpu?.user ?? 0) / 100)
+                                .breezeAnimation(.drift, value: model.latest?.cpu?.user)
                             Rectangle().fill(Color.orange).frame(width: proxy.size.width * (model.latest?.cpu?.system ?? 0) / 100)
+                                .breezeAnimation(.drift, value: model.latest?.cpu?.system)
                             Spacer(minLength: 0)
                         }.background(.primary.opacity(0.08)).clipShape(Capsule())
                     }.frame(height: 9)
@@ -91,6 +106,12 @@ struct ActivityView<Thermal: View>: View {
                 }
             }.padding(20).activitySurface()
             historyChart("CPU utilization", value: { $0.cpu?.used })
+            powerPanel
+            if model.latest?.power?.cpuWatts != nil {
+                historyChart("CPU power", color: .orange, unit: "W", maximum: nil, value: { $0.power?.cpuWatts })
+            } else if model.latest?.power?.systemWatts != nil {
+                historyChart("Whole-Mac power", color: .orange, unit: "W", maximum: nil, value: { $0.power?.systemWatts })
+            }
             VStack(alignment: .leading, spacing: 12) {
                 Text("Load per core").font(.headline)
                 if let cores = model.latest?.cores, !cores.isEmpty {
@@ -112,11 +133,54 @@ struct ActivityView<Thermal: View>: View {
                     Text("Processor").font(.headline)
                     valueRow("Physical cores", value: model.physicalCores.map(String.init) ?? "—")
                     valueRow("Logical cores", value: String(model.logicalCores))
-                    Text("Load is the number of runnable or waiting tasks. Live clock frequency isn’t exposed by this monitor.")
+                    Text("Load is the number of runnable or waiting tasks.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(20).activitySurface()
             }
         }
+    }
+
+    private var powerPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Power & frequency").font(.headline)
+                Spacer()
+                if let system = model.latest?.power?.systemWatts {
+                    Text("Whole Mac \(watts(system))").font(.caption).breezeLive().foregroundStyle(.secondary)
+                }
+            }
+            if let power = model.latest?.power {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                    valueRow("CPU power", value: power.cpuWatts.map(watts) ?? "Needs helper")
+                    valueRow("GPU power", value: watts(power.gpuWatts))
+                    valueRow("Neural Engine power", value: power.aneWatts.map(watts) ?? "Needs helper")
+                    valueRow("Whole Mac", value: power.systemWatts.map(watts) ?? "—")
+                    valueRow("Efficiency cores", value: cluster(power.efficiencyMHz, power.efficiencyActive))
+                    valueRow("Performance cores", value: cluster(power.performanceMHz, power.performanceActive))
+                }
+                if power.cpuWatts == nil {
+                    HStack(alignment: .top, spacing: 10) {
+                        Label("macOS shares CPU and Neural Engine energy only with privileged processes. Breeze reads them through its cooling helper while it’s connected.", systemImage: "lock")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        if let connect = model.connectHelper {
+                            Button("Connect helper") { connect() }.breezeAction(size: .small)
+                        }
+                    }
+                }
+                Text("GPU energy and frequency residency come from the chip’s IOReport counters, the same source as powermetrics; whole-Mac power comes from the SMC. Frequency is the average while active.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(model.latest == nil ? "Reading power counters…" : "Power and frequency counters are unavailable on this Mac.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(20).activitySurface()
+    }
+    private func watts(_ value: Double) -> String { String(format: value < 10 ? "%.2f W" : "%.1f W", max(0, value)) }
+    private func mhz(_ value: Double?) -> String { value.map { "\(Int($0.rounded())) MHz" } ?? "—" }
+    private func cluster(_ frequency: Double?, _ active: Double?) -> String {
+        [frequency.map { "\(Int($0.rounded())) MHz" }, active.map { "\(Int(($0 * 100).rounded()))% active" }]
+            .compactMap { $0 }.joined(separator: " · ").nilIfEmpty ?? "—"
     }
 
     private var gpu: some View {
@@ -132,6 +196,12 @@ struct ActivityView<Thermal: View>: View {
                             if let cores = gpu.cores { Text("\(cores) cores").font(.caption).foregroundStyle(.secondary) }
                         }
                         utilization("GPU utilization", value: gpu.utilization, color: accent)
+                        if let power = model.latest?.power {
+                            HStack(spacing: 20) {
+                                valueRow("GPU power", value: watts(power.gpuWatts))
+                                valueRow("GPU frequency", value: mhz(power.gpuMHz))
+                            }
+                        }
                         HStack(spacing: 20) {
                             utilization("Renderer", value: gpu.renderer, color: .blue)
                             utilization("Tiler", value: gpu.tiler, color: .purple)
@@ -148,7 +218,10 @@ struct ActivityView<Thermal: View>: View {
                     description: Text("This Mac’s graphics driver is not exposing utilization counters."))
                     .frame(minHeight: 260).frame(maxWidth: .infinity).activitySurface()
             }
-            Label("System-wide FPS and Neural Engine utilization are not available from this monitor. GPU counters depend on your Mac’s graphics driver.", systemImage: "info.circle")
+            if model.latest?.power != nil {
+                historyChart("GPU power", color: .purple, unit: "W", maximum: nil, value: { $0.power?.gpuWatts })
+            }
+            Label("System-wide FPS is not available from this monitor. Neural Engine activity appears as power on the CPU tab. GPU counters depend on your Mac’s graphics driver.", systemImage: "info.circle")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -160,15 +233,18 @@ struct ActivityView<Thermal: View>: View {
                     ActivityRing(value: memory.percent, color: .blue)
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("Used: \(bytes(memory.used))").font(.headline)
+                            Text("Used: \(bytes(memory.used))").font(.headline).breezeLive()
                             Spacer()
                             Text("Total: \(bytes(memory.total))").font(.caption).foregroundStyle(.secondary)
                         }
                         GeometryReader { proxy in
                             HStack(spacing: 0) {
                                 Rectangle().fill(.blue).frame(width: proxy.size.width * fraction(memory.app, memory.total))
+                                    .breezeAnimation(.drift, value: fraction(memory.app, memory.total))
                                 Rectangle().fill(.orange).frame(width: proxy.size.width * fraction(memory.wired, memory.total))
+                                    .breezeAnimation(.drift, value: fraction(memory.wired, memory.total))
                                 Rectangle().fill(.pink).frame(width: proxy.size.width * fraction(memory.compressed, memory.total))
+                                    .breezeAnimation(.drift, value: fraction(memory.compressed, memory.total))
                                 Spacer(minLength: 0)
                             }.background(.primary.opacity(0.08)).clipShape(Capsule())
                         }.frame(height: 10)
@@ -199,7 +275,7 @@ struct ActivityView<Thermal: View>: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Swap").font(.headline)
                     Text(model.latest?.memory?.swapUsed.map { bytes($0) } ?? "—")
-                        .font(.system(size: 24, weight: .medium, design: .rounded)).monospacedDigit()
+                        .font(.system(size: 24, weight: .medium, design: .rounded)).breezeLive()
                     valueRow("Allocated", value: model.latest?.memory?.swapTotal.map { bytes($0) } ?? "—")
                     Text("Disk space used to move memory out of RAM.").font(.caption).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(20).activitySurface()
@@ -225,19 +301,20 @@ struct ActivityView<Thermal: View>: View {
         HStack(spacing: 5) {
             RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 7, height: 7)
             Text(title).foregroundStyle(.secondary)
-            Text(value).fontWeight(.medium).monospacedDigit()
+            Text(value).fontWeight(.medium).breezeLive()
         }.font(.caption)
     }
     private func valueRow(_ title: String, value: String) -> some View {
-        HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).monospacedDigit() }.font(.caption)
+        HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).breezeLive() }.font(.caption)
     }
     private func utilization(_ title: String, value: Double?, color: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(percent(value)).monospacedDigit() }.font(.caption)
+            HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(percent(value)).breezeLive() }.font(.caption)
             GeometryReader { proxy in
                 Capsule().fill(.primary.opacity(0.1))
                     .overlay(alignment: .leading) {
                         Capsule().fill(color).frame(width: proxy.size.width * min(1, max(0, (value ?? 0) / 100)))
+                            .breezeAnimation(.drift, value: value)
                     }
             }.frame(height: 7)
                 .accessibilityElement(children: .ignore)
@@ -259,17 +336,38 @@ struct ActivityView<Thermal: View>: View {
                 previousDate = sample.date
             } else { segment += 1 }
         }
+        let series = points
         let top = maximum ?? max(1, (points.map(\.value).max() ?? 0) * 1.2)
+        func format(_ number: Double) -> String { String(format: unit == "%" ? "%.0f%%" : "%.2f \(unit)", number) }
+        // Only show the shared scrub where this chart has a sample close to it (gaps stay empty).
+        let hovered = scrub.flatMap { date in
+            BreezeMotion.nearest(points, to: date, by: \.date).flatMap { abs($0.date.timeIntervalSince(date)) <= 5 ? $0 : nil }
+        }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text(title).font(.headline)
                 Spacer()
-                if let last = points.last { Text(String(format: unit == "%" ? "%.0f%%" : "%.2f \(unit)", last.value)).font(.caption).monospacedDigit().foregroundStyle(.secondary) }
+                if let last = points.last { Text(format(last.value)).font(.caption).breezeLive().foregroundStyle(.secondary) }
             }
-            Chart(points) { point in
-                AreaMark(x: .value("Time", point.date), y: .value(title, point.value), series: .value("Interval", point.segment))
-                    .foregroundStyle(LinearGradient(colors: [tint.opacity(0.45), tint.opacity(0.06)], startPoint: .top, endPoint: .bottom))
-                LineMark(x: .value("Time", point.date), y: .value(title, point.value), series: .value("Interval", point.segment)).foregroundStyle(tint).lineStyle(StrokeStyle(lineWidth: 1.4))
+            Chart {
+                ForEach(series) { point in
+                    AreaMark(x: .value("Time", point.date), y: .value(title, point.value), series: .value("Interval", point.segment))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(LinearGradient(colors: [tint.opacity(0.45), tint.opacity(0.06)], startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("Time", point.date), y: .value(title, point.value), series: .value("Interval", point.segment))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(tint).lineStyle(StrokeStyle(lineWidth: 1.4))
+                }
+                if let hovered {
+                    RuleMark(x: .value("Time", hovered.date))
+                        .foregroundStyle(.primary.opacity(0.25)).lineStyle(StrokeStyle(lineWidth: 1))
+                    PointMark(x: .value("Time", hovered.date), y: .value(title, hovered.value))
+                        .symbolSize(48).foregroundStyle(tint)
+                        .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                            BreezeChartCallout(title: hovered.date.formatted(.dateTime.hour().minute().second()),
+                                               value: format(hovered.value), tint: tint)
+                        }
+                }
             }
             .chartXScale(domain: end.addingTimeInterval(-Double(model.windowSeconds))...end)
             .chartYScale(domain: 0...top)
@@ -280,6 +378,10 @@ struct ActivityView<Thermal: View>: View {
                 }
             }
             .chartXAxis { AxisMarks(values: [0.85, 0.5, 0.15].map { end.addingTimeInterval(-Double(model.windowSeconds) * $0) }) { _ in AxisValueLabel(format: .dateTime.hour().minute().second()).font(.system(size: 9)) } }
+            .chartPlotStyle { $0.breezeChartDrawIn(key: "statistics.chart.\(title)") }
+            .breezeChartScrub($scrub)
+            .saturation(model.paused ? 0.6 : 1)
+            .breezeAnimation(.settle, value: model.paused)
             .frame(height: 140)
             .overlay { if points.isEmpty { Text(model.latest == nil ? "Waiting for readings…" : "Waiting for an available sample…").font(.caption).foregroundStyle(.secondary) } }
             .accessibilityLabel(title)
@@ -300,11 +402,9 @@ private struct ActivityRing: View {
     let color: Color
     var body: some View {
         ZStack {
-            Circle().stroke(.primary.opacity(0.1), lineWidth: 6)
-            Circle().trim(from: 0, to: min(1, max(0, (value ?? 0) / 100)))
-                .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round)).rotationEffect(.degrees(-90))
+            BreezeRing(fraction: (value ?? 0) / 100, lineWidth: 6, tint: color)
             Text(value.map { String(format: "%.0f%%", $0) } ?? "—")
-                .font(.system(size: 20, weight: .semibold, design: .rounded)).monospacedDigit()
+                .font(.system(size: 20, weight: .semibold, design: .rounded)).breezeLive()
         }.frame(width: 74, height: 74).accessibilityElement(children: .ignore)
             .accessibilityLabel("Utilization").accessibilityValue(value.map { "\(Int($0)) percent" } ?? "Unavailable")
     }
@@ -314,4 +414,8 @@ extension View {
     fileprivate func activitySurface() -> some View {
         breezeSurface(radius: 18)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

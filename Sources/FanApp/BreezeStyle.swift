@@ -4,11 +4,31 @@ import SwiftUI
 enum BreezeStyle {
     static let mint = Color(red: 0.22, green: 0.67, blue: 0.55)
     static let blue = Color(red: 0.38, green: 0.55, blue: 0.88)
+    /// Horizontal page padding on every page.
+    static let pagePadding: CGFloat = 28
+
+    /// Switch to these when touching a text; no mass rename.
+    enum Typography {
+        static let display = Font.system(size: 42, weight: .light, design: .rounded)
+        static let title = Font.system(size: 28, weight: .semibold, design: .rounded)
+        static let numeralL = Font.system(size: 27, weight: .medium, design: .rounded)
+        static let numeralM = Font.system(size: 21, weight: .medium, design: .rounded)
+        /// Use with `.tracking(Typography.eyebrowTracking)`.
+        static let eyebrow = Font.system(size: 9, weight: .semibold)
+        static let eyebrowTracking: CGFloat = 1.0
+    }
 }
 
+/// Thermal aurora: three fixed radial fields over the behind-window material. The heat
+/// field follows `breezeHeat` with hysteresis, so a reading on a boundary never retriggers it.
 struct BreezeBackdrop: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.breezeHeat) private var heat
+    @Environment(\.breezeMotionLevel) private var level
+    @State private var gate = HeatGate()
+    @State private var shown = 0.0
 
     var body: some View {
         ZStack {
@@ -16,10 +36,46 @@ struct BreezeBackdrop: View {
                 Color(nsColor: .windowBackgroundColor)
             } else {
                 BreezeWindowMaterial()
-                LinearGradient(colors: [BreezeStyle.mint.opacity(0.08), .clear, BreezeStyle.blue.opacity(0.05)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                field(BreezeStyle.mint.opacity(0.10), at: UnitPoint(x: 0.15, y: 0.10))
+                field(BreezeStyle.blue.opacity(0.06), at: UnitPoint(x: 0.90, y: 0.95))
+                field(BreezeMotion.thermalColor(shown).opacity(0.05 + 0.09 * shown), at: UnitPoint(x: 0.62, y: 0.22))
             }
-        }.ignoresSafeArea()
+        }
+        .ignoresSafeArea()
+        .onChange(of: heat, initial: true) {
+            guard gate.offer(heat, now: .now) else { return }
+            // Animate only where it can be seen; otherwise the value waits for the window to return.
+            if level.isActive || reduceMotion {
+                withAnimation(BreezeMotion.animation(.ambient, reduceMotion: reduceMotion)) { shown = gate.applied }
+            }
+        }
+        .onChange(of: level.isActive) { _, active in
+            if active, shown != gate.applied { shown = gate.applied }
+        }
+    }
+
+    private func field(_ color: Color, at center: UnitPoint) -> some View {
+        Rectangle().fill(RadialGradient(colors: [color, color.opacity(0)], center: center, startRadius: 0, endRadius: 520))
+    }
+
+    /// Applies a new 0.05 heat step when it differs by 0.10 or more, or when the same
+    /// different step has been pending for 10 s or more.
+    struct HeatGate {
+        private(set) var applied = 0.0
+        private var pending: (step: Int, since: Date)?
+
+        mutating func offer(_ heat: Double, now: Date) -> Bool {
+            let step = Int((min(max(heat, 0), 1) * 20).rounded())
+            let current = Int((applied * 20).rounded())
+            if step == current { pending = nil; return false }
+            if abs(step - current) >= 2 || (pending?.step == step && now.timeIntervalSince(pending!.since) >= 10) {
+                applied = Double(step) / 20
+                pending = nil
+                return true
+            }
+            if pending?.step != step { pending = (step, now) }
+            return false
+        }
     }
 }
 
@@ -112,6 +168,7 @@ struct BreezeButtonStyle: ButtonStyle {
     @Environment(\.controlSize) private var size
     @Environment(\.isFocused) private var focused
     @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     private var height: CGFloat {
@@ -136,11 +193,17 @@ struct BreezeButtonStyle: ButtonStyle {
             .frame(height: height)
             .foregroundStyle(prominent ? (destructive ? Color.white : Color.black.opacity(0.88)) : (destructive ? Color.red : Color.primary))
             .background(prominent ? accent : Color(nsColor: .controlBackgroundColor), in: shape)
-            .overlay(shape.fill(Color.primary.opacity(enabled && configuration.isPressed ? 0.12 : enabled && hovering ? 0.06 : 0)))
+            .overlay(shape.fill(Color.primary.opacity(enabled && configuration.isPressed ? 0.12 : enabled && hovering ? 0.06 : 0))
+                .animation(BreezeMotion.animation(.hover, reduceMotion: reduceMotion), value: hovering))
             .overlay(shape.strokeBorder(prominent ? accent.opacity(0.6) : Color.primary.opacity(contrast == .increased ? 0.4 : 0.14), lineWidth: 1))
-            .overlay(shape.inset(by: -3).strokeBorder(BreezeStyle.mint.opacity(enabled && focused ? 0.8 : 0), lineWidth: 2))
+            .overlay(shape.inset(by: -3).strokeBorder(BreezeStyle.mint.opacity(enabled && focused ? 0.8 : 0), lineWidth: 2)
+                .animation(BreezeMotion.animation(.press, reduceMotion: reduceMotion), value: focused))
             .opacity(enabled ? 1 : 0.42)
             .contentShape(shape)
+            .animation(BreezeMotion.animation(.press, reduceMotion: reduceMotion)) {
+                // Labels are single-line at a fixed height, so the press scale cannot shimmer text.
+                $0.scaleEffect(enabled && configuration.isPressed && !reduceMotion ? 0.97 : 1)
+            }
             .onHover { hovering = $0 }
     }
 }
@@ -160,5 +223,25 @@ extension View {
     }
     func breezeAction(prominent: Bool = false, size: ControlSize = .regular) -> some View {
         modifier(BreezeActionStyle(prominent: prominent, size: size))
+    }
+}
+
+/// A disclosure group whose title text also toggles it, not just the arrow.
+struct BreezeDisclosure<Content: View>: View {
+    private let title: String
+    private let content: Content
+    @State private var expanded = false
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) { content } label: {
+            Button(title) { BreezeMotion.animate(.settle) { expanded.toggle() } }
+                .buttonStyle(.plain)
+                .accessibilityHidden(true) // the group itself is the accessible toggle
+        }
     }
 }

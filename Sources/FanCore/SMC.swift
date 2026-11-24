@@ -162,4 +162,100 @@ public final class SMC {
         }
         guard failures.isEmpty else { throw FanError(failures.joined(separator: " ")) }
     }
+
+    public private(set) var chargingInhibited = false
+
+    /// Apple silicon firmware since macOS 15 uses CHTE (4 bytes); earlier firmware uses CH0B/CH0C (1 byte).
+    /// Writes raw bytes because these keys are flags, not numbers, and verifies each readback.
+    public func setCharging(allowed: Bool) throws {
+        var writes: [(String, [UInt8])] = []
+        if let (_, bytes) = try? raw("CHTE"), bytes.count == 4 {
+            writes = [("CHTE", [allowed ? 0 : 1, 0, 0, 0])]
+        } else if let (_, bytes) = try? raw("CH0B"), bytes.count == 1 {
+            writes = [("CH0B", [allowed ? 0 : 2])]
+            if let (_, other) = try? raw("CH0C"), other.count == 1 { writes.append(("CH0C", [allowed ? 0 : 2])) }
+        } else {
+            throw FanError("This Mac’s firmware doesn’t expose a supported charging control.")
+        }
+        if !allowed { chargingInhibited = true } // Include partial writes in restoration.
+        for (key, value) in writes {
+            try WriteVerification.apply(attempts: 3, write: {
+                let result = breeze_smc_write(self.connection, key, UInt32(value.count), value)
+                guard result == 0 else { throw FanError("AppleSMC rejected \(key) (\(result)).") }
+            }, matches: { (try? self.raw(key))?.1 == value }, pause: { usleep(100_000) })
+        }
+        chargingInhibited = !allowed
+    }
+
+    public func restoreCharging() throws {
+        guard chargingInhibited else { return }
+        try setCharging(allowed: true)
+    }
+
+    public private(set) var adapterDisabled = false
+
+    /// Whether charging can be paused directly. macOS 27-era firmware gates these keys
+    /// (and bfF0/bfD0/bfE0) behind an Apple entitlement; only the adapter key stays open.
+    public var canInhibitCharging: Bool {
+        (try? raw("CHTE"))?.1.count == 4 || (try? raw("CH0B"))?.1.count == 1
+    }
+
+    /// CHIE (1 byte, 0x08 disconnects) on current firmware, CH0I (1 byte, 0x01) on earlier firmware.
+    /// CH0J is deliberately unsupported: open-source tools disagree on its value.
+    public var adapterControl: (key: String, off: UInt8)? {
+        if let (_, bytes) = try? raw("CHIE"), bytes.count == 1 { return ("CHIE", 0x08) }
+        if let (_, bytes) = try? raw("CH0I"), bytes.count == 1 { return ("CH0I", 0x01) }
+        return nil
+    }
+
+    public func setAdapter(enabled: Bool) throws {
+        guard let control = adapterControl else {
+            throw FanError("This Mac’s firmware doesn’t expose a supported adapter control.")
+        }
+        let value: [UInt8] = [enabled ? 0 : control.off]
+        if !enabled { adapterDisabled = true } // Include partial writes in restoration.
+        try WriteVerification.apply(attempts: 3, write: {
+            let result = breeze_smc_write(self.connection, control.key, 1, value)
+            guard result == 0 else { throw FanError("AppleSMC rejected \(control.key) (\(result)).") }
+        }, matches: { (try? self.raw(control.key))?.1 == value }, pause: { usleep(100_000) })
+        adapterDisabled = !enabled
+    }
+
+    public func restoreAdapter() throws {
+        guard adapterDisabled else { return }
+        try setAdapter(enabled: true)
+    }
+
+    public private(set) var magSafeLEDOverridden = false
+
+    /// MagSafe 3 Macs expose ACLC (1 byte). Other Macs and gated firmware don't.
+    public var magSafeLED: UInt8? {
+        guard let (_, bytes) = try? raw("ACLC"), bytes.count == 1 else { return nil }
+        return bytes[0]
+    }
+
+    /// 0 returns the light to macOS; see `MagSafeLED` for the others.
+    public func setMagSafeLED(_ value: UInt8) throws {
+        guard magSafeLED != nil else { throw FanError("This Mac doesn’t expose a MagSafe light control.") }
+        if value != 0 { magSafeLEDOverridden = true } // Include partial writes in restoration.
+        try WriteVerification.apply(attempts: 3, write: {
+            let result = breeze_smc_write(self.connection, "ACLC", 1, [value])
+            guard result == 0 else { throw FanError("AppleSMC rejected ACLC (\(result)).") }
+        }, matches: { self.magSafeLED == value }, pause: { usleep(100_000) })
+        magSafeLEDOverridden = value != 0
+    }
+
+    public func restoreMagSafeLED() throws {
+        guard magSafeLEDOverridden else { return }
+        try setMagSafeLED(0)
+    }
+
+    /// Read-only probe for `--status`: which charging keys exist and their sizes in bytes.
+    public func chargingKeys() -> [String: Int] {
+        var keys: [String: Int] = [:]
+        for key in ["CHTE", "CH0B", "CH0C", "CHIE", "CH0I", "CH0J", "bfF0", "bfD0", "bfE0", "ACLC"] {
+            if let (_, bytes) = try? raw(key) { keys[key] = bytes.count }
+        }
+        return keys
+    }
 }

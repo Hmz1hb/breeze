@@ -7,10 +7,11 @@ let package = Package(
     products: [
         .executable(name: "Breeze", targets: ["FanApp"]),
         .executable(name: "BreezeHelper", targets: ["FanHelper"]),
-        .executable(name: "BreezeMCP", targets: ["BreezeMCP"])
+        .executable(name: "BreezeMCP", targets: ["BreezeMCP"]),
+        .executable(name: "BreezeWidgets", targets: ["BreezeWidgets"])
     ],
     targets: [
-        .target(name: "CHardware", linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("Security"), .linkedFramework("CoreFoundation")]),
+        .target(name: "CHardware", linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("Security"), .linkedFramework("CoreFoundation"), .linkedLibrary("IOReport")]),
         .target(name: "FanCore", dependencies: ["CHardware"]),
         .target(name: "StorageCore", linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("AppKit"), .linkedFramework("CoreServices")]),
         .target(name: "CleanupAssistant", dependencies: ["StorageCore"]),
@@ -18,8 +19,12 @@ let package = Package(
         .executableTarget(name: "FanApp", dependencies: ["FanCore", "CHardware", "StorageCore", "NetworkCore", "CleanupAssistant"]),
         .executableTarget(name: "FanHelper", dependencies: ["FanCore", "CHardware"]),
         .executableTarget(name: "BreezeMCP", dependencies: ["CleanupAssistant", "StorageCore"]),
+        // Packaged by scripts/build.sh as Contents/PlugIns/BreezeWidgets.appex.
+        // Like Xcode's extension targets, start in NSExtensionMain; WidgetKit then finds the @main bundle.
+        .executableTarget(name: "BreezeWidgets", dependencies: ["FanCore"],
+                          linkerSettings: [.unsafeFlags(["-Xlinker", "-e", "-Xlinker", "_NSExtensionMain"])]),
         .testTarget(name: "FanCoreTests", dependencies: ["FanCore"]),
-        .testTarget(name: "StorageCoreTests", dependencies: ["StorageCore"]),
+        .testTarget(name: "StorageCoreTests", dependencies: ["StorageCore", "CleanupAssistant"]),
         .testTarget(name: "NetworkCoreTests", dependencies: ["NetworkCore"]),
         .testTarget(name: "FanAppTests", dependencies: ["FanApp", "StorageCore"])
     ]

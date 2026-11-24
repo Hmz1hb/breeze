@@ -121,9 +121,11 @@ public struct LocalDevice: Sendable, Identifiable, Equatable {
         if identity.contains("homepod") || identity.contains("audioaccessory") { return "HomePod" }
         if identity.contains("macbook") || identity.contains("imac") || identity.contains("macmini") || identity.contains("macpro") || identity.contains("macstudio") { return "Mac" }
         if services.contains(where: { $0.contains("ipp") || $0.contains("printer") }) { return "Printer" }
-        if services.contains("_apple-mobdev2._tcp") { return "Apple mobile device" }
+        if services.contains("_apple-mobdev2._tcp") || services.contains("_remotepairing._tcp") { return "Apple mobile device" }
         if services.contains(where: { $0.contains("airplay") || $0.contains("googlecast") }) { return "Media device" }
         if services.contains(where: { $0.contains("smb") || $0.contains("workstation") || $0.contains("ssh") }) { return "Computer / NAS" }
+        // A private address is a hint, not proof: phones, tablets, watches and newer laptops all use them.
+        if hasPrivateMAC && services.isEmpty { return "Private Wi-Fi device" }
         return "Unidentified device"
     }
     public var symbol: String {
@@ -131,6 +133,7 @@ public struct LocalDevice: Sendable, Identifiable, Equatable {
         case "This Mac": "laptopcomputer"
         case "Router": "wifi.router"
         case "iPhone", "iPod", "Apple mobile device": "iphone"
+        case "Private Wi-Fi device": "iphone.radiowaves.left.and.right"
         case "iPad": "ipad"
         case "Apple TV": "appletv"
         case "HomePod": "homepod"

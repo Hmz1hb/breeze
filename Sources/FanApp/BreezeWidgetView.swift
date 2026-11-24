@@ -17,6 +17,7 @@ struct BreezeWidgetView: View {
     var onHeightChange: ((CGFloat) -> Void)?
     @Environment(\.openWindow) private var openWindow
     @State private var contentHeight: CGFloat?
+    @State private var scrub: Date?
 
     private var preferences: WidgetPreferences { model.widgetPreferences }
     private var reading: ActivityReading? {
@@ -31,17 +32,27 @@ struct BreezeWidgetView: View {
         }
     }
 
+    private var heat: Double {
+        BreezeMotion.heat(temperature: model.sleeping ? nil : model.snapshot?.hottest,
+                          boost: model.configuration.boostTemperature)
+    }
+    // One value that changes whenever a notice appears, leaves or changes text.
+    private var noticeKey: String {
+        "\(model.sleeping)|\(model.readError != nil)|\(model.snapshot == nil)|\(model.message ?? "")"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header.padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 14)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if model.sleeping {
-                        notice("Readings paused while your Mac sleeps.", symbol: "moon.zzz")
+                        notice("Readings paused while your Mac sleeps.", symbol: "moon.zzz").transition(.breezeDrop)
                     } else if model.readError != nil {
                         notice("Hardware readings unavailable. Waiting to reconnect…", symbol: "exclamationmark.triangle")
+                            .transition(.breezeDrop)
                     } else if model.snapshot == nil {
-                        notice("Waiting for live sensor readings…", symbol: "sensor")
+                        notice("Waiting for live sensor readings…", symbol: "sensor").transition(.breezeDrop)
                     }
                     if !preferences.metrics.isEmpty { metrics }
                     coolingStatus
@@ -52,11 +63,13 @@ struct BreezeWidgetView: View {
                     if preferences.sections.contains(.storage) { storageDetails }
                     if preferences.sections.contains(.sensors) { sensorDetails }
                     if preferences.sections.contains(.processes) { topProcesses }
+                    if preferences.sections.contains(.devices) { deviceBatteries }
                     if preferences.sections.contains(.controls) { coolingControls }
                     if let message = model.message {
-                        notice(message, symbol: "info.circle")
+                        notice(message, symbol: "info.circle").transition(.breezeDrop)
                     }
                 }
+                .breezeAnimation(.settle, value: noticeKey)
                 .padding(.horizontal, 18).padding(.bottom, 16)
                 .onGeometryChange(for: CGFloat.self) { geometry in
                     geometry.size.height
@@ -121,7 +134,9 @@ struct BreezeWidgetView: View {
                                 .font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
                             Text(WidgetValues.value(metric, model: model))
                                 .font(.system(size: metric == .temperature ? 34 : 28, weight: .medium, design: .rounded))
-                                .tracking(-1).monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
+                                .tracking(-1).breezeLive().lineLimit(1).minimumScaleFactor(0.65)
+                                .foregroundStyle(metric == .temperature ? BreezeMotion.thermalColor(heat) : Color.primary)
+                                .breezeAnimation(.settle, value: heat)
                             Text(metric == .temperature ? "Hottest die sensor" : fanCaption)
                                 .font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
                                 .lineLimit(1).minimumScaleFactor(0.8)
@@ -142,7 +157,7 @@ struct BreezeWidgetView: View {
                                 Text(metric.title).foregroundStyle(.secondary)
                             }.font(.system(size: 10, weight: .medium))
                             Text(WidgetValues.value(metric, model: model))
-                                .font(.system(size: 21, weight: .semibold, design: .rounded)).monospacedDigit()
+                                .font(.system(size: 21, weight: .semibold, design: .rounded)).breezeLive()
                             meter(WidgetValues.percent(metric, model: model), color: BreezeStyle.blue)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(10).widgetInset()
                             .accessibilityElement(children: .combine)
@@ -163,18 +178,29 @@ struct BreezeWidgetView: View {
         HStack(alignment: .top, spacing: 7) {
             Circle().fill(model.snapshot == nil || model.sleeping ? Color.secondary : thermalColor)
                 .frame(width: 6, height: 6).padding(.top, 4)
+                .breezeAnimation(.settle, value: model.snapshot == nil || model.sleeping)
+                .breezeAnimation(.settle, value: model.snapshot?.thermalPressure)
             Text(model.statusTitle).font(.system(size: 11, weight: .medium))
                 .fixedSize(horizontal: false, vertical: true)
+                .contentTransition(.opacity)
+                .breezeAnimation(.settle, value: model.statusTitle)
             Spacer(minLength: 4)
             if let remaining = model.boostRemaining {
                 Text(remaining).font(.system(size: 11, weight: .semibold, design: .rounded))
                     .monospacedDigit().foregroundStyle(BreezeStyle.mint)
+                    .contentTransition(.numericText(countsDown: true))
+                    .breezeAnimation(.settle, value: remaining)
                     .accessibilityLabel("Boost time remaining: \(remaining)")
+                    .transition(.breezeFade)
             } else {
                 Text(model.sleeping ? "PAUSED" : model.snapshot == nil ? "OFFLINE" : "LIVE")
                     .font(.system(size: 8, weight: .semibold)).tracking(1).foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
+                    .transition(.breezeFade)
             }
         }
+        .breezeAnimation(.settle, value: model.boostEndsAt != nil)
+        .breezeAnimation(.settle, value: model.sleeping)
     }
 
     private var temperatureHistory: some View {
@@ -192,9 +218,21 @@ struct BreezeWidgetView: View {
                     LineMark(x: .value("Time", sample.date), y: .value("Temperature", sample.temperature))
                         .foregroundStyle(BreezeStyle.mint).lineStyle(StrokeStyle(lineWidth: 1.8, lineCap: .round))
                 }
+                if let scrub, let near = BreezeMotion.nearest(samples, to: scrub, by: \.date) {
+                    RuleMark(x: .value("Time", near.date))
+                        .foregroundStyle(.primary.opacity(0.25)).lineStyle(StrokeStyle(lineWidth: 1))
+                        .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                            BreezeChartCallout(title: near.date.formatted(date: .omitted, time: .standard),
+                                               value: "\(Int(near.temperature))°C")
+                        }
+                    PointMark(x: .value("Time", near.date), y: .value("Temperature", near.temperature))
+                        .symbolSize(48).foregroundStyle(BreezeStyle.mint)
+                }
             }
             .chartXScale(domain: end.addingTimeInterval(-Double(preferences.historySeconds))...end)
             .chartYScale(domain: low...high).chartXAxis(.hidden).chartYAxis(.hidden)
+            .breezeChartScrub($scrub)
+            .breezeChartKeys($scrub, dates: samples.map(\.date))
             .frame(height: 66)
             .overlay {
                 if samples.count < 2 {
@@ -207,7 +245,7 @@ struct BreezeWidgetView: View {
                 Text("\(preferences.historySeconds / 60)m ago")
                 Spacer()
                 if let min = samples.map(\.temperature).min(), let max = samples.map(\.temperature).max() {
-                    Text("\(Int(min))–\(Int(max))°C").monospacedDigit()
+                    Text("\(Int(min))–\(Int(max))°C").breezeLive()
                 }
                 Spacer()
                 Text(model.sleeping ? "Paused" : model.snapshot == nil ? "Last reading" : "Now")
@@ -226,9 +264,10 @@ struct BreezeWidgetView: View {
                         meter(fan.maximum > 0 ? fan.current / fan.maximum * 100 : nil, color: BreezeStyle.mint)
                         HStack {
                             Text(fan.isManual ? "Manual" : "Automatic")
+                                .contentTransition(.opacity).breezeAnimation(.settle, value: fan.isManual)
                             Spacer()
                             Text("\(Int(fan.minimum))–\(Int(fan.maximum)) RPM")
-                        }.font(.system(size: 9)).foregroundStyle(.secondary).monospacedDigit()
+                        }.font(.system(size: 9)).foregroundStyle(.secondary).breezeLive()
                     }
                 }
             } else { waiting("Waiting for fan readings…") }
@@ -254,6 +293,7 @@ struct BreezeWidgetView: View {
                                     .overlay(alignment: .bottom) {
                                         RoundedRectangle(cornerRadius: 3).fill(BreezeStyle.blue.opacity(0.8))
                                             .frame(height: proxy.size.height * min(1, max(0, (cores[index]?.used ?? 0) / 100)))
+                                            .breezeAnimation(.drift, value: cores[index]?.used)
                                     }
                             }.frame(height: 28)
                                 .accessibilityLabel("Core \(index + 1)").accessibilityValue(percent(cores[index]?.used))
@@ -333,7 +373,7 @@ struct BreezeWidgetView: View {
             valueRow("CPU die", value: model.sleeping ? "—" : degrees(model.snapshot?.cpuTemperature))
             valueRow("GPU die", value: model.sleeping ? "—" : degrees(model.snapshot?.gpuTemperature))
             if let sensors = model.snapshot?.temperatures, !sensors.isEmpty, !model.sleeping {
-                DisclosureGroup("Die sensors · \(sensors.count) readings") {
+                BreezeDisclosure("Die sensors · \(sensors.count) readings") {
                     VStack(spacing: 8) {
                         ForEach(sensors, id: \.key) { sensor in
                             valueRow(sensor.key, value: String(format: "%.1f°C", sensor.celsius))
@@ -356,13 +396,37 @@ struct BreezeWidgetView: View {
                     HStack(spacing: 8) {
                         Text(process.name).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 0)
-                        Text(percent(process.cpu)).monospacedDigit().frame(width: 45, alignment: .trailing)
+                        Text(percent(process.cpu)).breezeLive().frame(width: 45, alignment: .trailing)
                         Text(process.memory.map(bytes) ?? "—").foregroundStyle(.secondary)
-                            .monospacedDigit().frame(width: 60, alignment: .trailing)
+                            .breezeLive().frame(width: 60, alignment: .trailing)
                     }.font(.system(size: 10))
                 }
                 Text("CPU is per core; a process can exceed 100%.")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }.padding(12).widgetInset()
+    }
+
+    private var deviceBatteries: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Devices", detail: "BATTERY")
+            if let device = model.deviceBatteries.needsAccess.first, !model.deviceBatteries.accessDismissed {
+                Button { showApp(.battery) } label: {
+                    Label("Show \(device) battery…", systemImage: "computermouse").lineLimit(1)
+                }.buttonStyle(.link).font(.system(size: 10))
+            }
+            if model.deviceBatteries.devices.isEmpty {
+                waiting(model.deviceBatteries.updated == nil ? "Looking for Bluetooth devices…" : "No connected device reports a battery level.")
+            } else {
+                ForEach(model.deviceBatteries.devices) { device in
+                    HStack(spacing: 8) {
+                        Image(systemName: device.symbol).foregroundStyle(BreezeStyle.blue).frame(width: 16)
+                        Text(device.name).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Text(device.levels.map { ($0.label.isEmpty ? "" : "\($0.label.prefix(1)) ") + "\($0.percent)%" }.joined(separator: "  "))
+                            .breezeLive().foregroundStyle((device.lowest ?? 100) <= 20 ? .orange : .primary)
+                    }.font(.system(size: 10))
+                }
             }
         }.padding(12).widgetInset()
     }
@@ -397,16 +461,17 @@ struct BreezeWidgetView: View {
                         Button("End timed boost") {
                             guard !isPreview else { return }
                             Task { await model.endTimedBoost() }
-                        }
+                        }.transition(.breezeFade)
                     } else {
                         Button("Maximum cooling · 100%") {
                             guard !isPreview else { return }
                             Task { await model.maximum() }
-                        }
+                        }.transition(.breezeFade)
                     }
                     Spacer(minLength: 0)
-                    if model.busy { ProgressView().controlSize(.mini) }
+                    if model.busy { ProgressView().controlSize(.mini).transition(.breezeFade) }
                 }.font(.system(size: 10)).buttonStyle(.plain).foregroundStyle(.secondary)
+                    .breezeAnimation(.settle, value: model.busy)
             } else if model.snapshot?.fans.isEmpty == true {
                 waiting("This Mac doesn’t need a cooling fan.")
             } else {
@@ -464,7 +529,7 @@ struct BreezeWidgetView: View {
             if let symbol { Image(systemName: symbol).foregroundStyle(BreezeStyle.mint) }
             Text(title).foregroundStyle(.secondary)
             Spacer(minLength: 6)
-            Text(value).fontWeight(.medium).monospacedDigit()
+            Text(value).fontWeight(.medium).breezeLive()
         }.font(.system(size: 10)).accessibilityElement(children: .combine)
     }
     private func component(_ title: String, value: String, color: Color) -> some View {
@@ -473,15 +538,11 @@ struct BreezeWidgetView: View {
                 Circle().fill(color).frame(width: 4, height: 4)
                 Text(title).foregroundStyle(.secondary)
             }.font(.system(size: 9))
-            Text(value).font(.system(size: 12, weight: .semibold, design: .rounded)).monospacedDigit()
+            Text(value).font(.system(size: 12, weight: .semibold, design: .rounded)).breezeLive()
         }
     }
     private func meter(_ percent: Double?, color: Color) -> some View {
-        GeometryReader { proxy in
-            Capsule().fill(.primary.opacity(0.07)).overlay(alignment: .leading) {
-                Capsule().fill(color).frame(width: proxy.size.width * min(1, max(0, (percent ?? 0) / 100)))
-            }
-        }.frame(height: 4).accessibilityHidden(true)
+        BreezeMeter(fraction: percent.map { $0 / 100 }, tint: color, height: 4).accessibilityHidden(true)
     }
     private func notice(_ text: String, symbol: String) -> some View {
         Label(text, systemImage: symbol).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -519,7 +580,8 @@ struct BreezeWidgetView: View {
             guard model.readError == nil, let stats = model.systemStats, stats.memoryTotal > 0 else { return nil }
             return Double(stats.memoryUsed) / Double(stats.memoryTotal) * 100
         case .storage: return storageDrive(model: model).map { $0.usedFraction * 100 }
-        case .temperature, .fans: return nil
+        case .battery: return model.menuBarReadings.battery.map { Double($0.percent) }
+        case .temperature, .fans, .network: return nil
         }
     }
     static func value(_ metric: WidgetMetric, model: AppModel) -> String {
@@ -531,6 +593,10 @@ struct BreezeWidgetView: View {
             if fans.isEmpty { return "Fanless" }
             return "\(model.rpmLabel) RPM"
         case .cpu, .gpu, .memory, .storage: return percent(metric, model: model).map { String(format: "%.0f%%", $0) } ?? "—"
+        case .network: return model.menuBarReadings.traffic.map { "↓ " + MenuBarReadings.rate($0.download) } ?? "—"
+        case .battery:
+            guard let battery = model.menuBarReadings.battery else { return "—" }
+            return (battery.charging ? "⚡︎" : "") + "\(battery.percent)%"
         }
     }
     static func gib(_ value: UInt64) -> String { String(format: "%.1f", Double(value) / 1_073_741_824) }
@@ -539,6 +605,8 @@ struct BreezeWidgetView: View {
 struct WidgetMenuBarReading: Identifiable, Equatable {
     let metric: WidgetMetric
     let value: String
+    /// Upload rate under the download rate for the network reading.
+    var secondary: String? = nil
     var id: WidgetMetric { metric }
     // Reserve the complete range before any live values arrive. Changing digit
     // counts or showing an unavailable reading must not move menu bar items.
@@ -547,6 +615,8 @@ struct WidgetMenuBarReading: Identifiable, Equatable {
         case .temperature: "100°C"
         case .fans: "10000 RPM"
         case .cpu, .gpu, .memory, .storage: "100%"
+        case .network: "↓ 999 KB/s"
+        case .battery: "⚡︎100%"
         }
     }
     var title: String {
@@ -557,12 +627,18 @@ struct WidgetMenuBarReading: Identifiable, Equatable {
         case .gpu: "GPU"
         case .memory: "RAM"
         case .storage: "DISK"
+        case .network: "NET"
+        case .battery: "BAT"
         }
     }
 
     @MainActor static func current(model: AppModel) -> [Self] {
         WidgetMetric.allCases.filter { model.widgetPreferences.menuMetrics.contains($0) }
-            .map { Self(metric: $0, value: WidgetValues.value($0, model: model)) }
+            .map { metric in
+                let upload = metric == .network && !model.sleeping ? model.menuBarReadings.traffic.map { "↑ " + MenuBarReadings.rate($0.upload) } : nil
+                return Self(metric: metric, value: WidgetValues.value(metric, model: model),
+                            secondary: metric == .network ? upload ?? "—" : nil)
+            }
     }
 }
 
@@ -578,12 +654,21 @@ struct WidgetMenuBarLabel: View {
 struct WidgetMenuBarContent: View {
     let readings: [WidgetMenuBarReading]
     var showsFanIcon = true
+    /// Separate extra items carry no fan icon and no space for one.
+    var reservesFanIcon = true
+    /// Separate items always name their reading, since a lone "42%" is ambiguous.
+    var titled = false
 
     var body: some View {
         HStack(spacing: 9) {
-            WidgetMenuBarFanIcon().opacity(showsFanIcon ? 1 : 0)
+            if reservesFanIcon { WidgetMenuBarFanIcon().opacity(showsFanIcon ? 1 : 0) }
             ForEach(readings) { reading in
-                if readings.count == 1 {
+                if let secondary = reading.secondary {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        valueLabel(reading, font: .system(size: 9, weight: .semibold))
+                        valueLabel(WidgetMenuBarReading(metric: reading.metric, value: secondary), font: .system(size: 9, weight: .semibold))
+                    }
+                } else if readings.count == 1 && !titled {
                     valueLabel(reading, font: .system(size: 11, weight: .medium))
                 } else {
                     VStack(spacing: 0) {
@@ -596,7 +681,7 @@ struct WidgetMenuBarContent: View {
         .fixedSize().frame(height: 22)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Breeze")
-        .accessibilityValue(readings.map { "\($0.metric.title): \($0.value)" }.joined(separator: ", "))
+        .accessibilityValue(readings.map { "\($0.metric.title): \([$0.value, $0.secondary].compactMap { $0 }.joined(separator: " "))" }.joined(separator: ", "))
     }
 
     private func valueLabel(_ reading: WidgetMenuBarReading, font: Font) -> some View {

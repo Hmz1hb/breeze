@@ -5,7 +5,8 @@ import IOKit
 public struct CPUActivity: Sendable {
     public let user: Double
     public let system: Double
-    public var used: Double { user + system }
+    /// Clamped: with zero idle ticks, floating-point rounding can put the sum just past 100.
+    public var used: Double { min(100, user + system) }
     public var idle: Double { max(0, 100 - used) }
 
     /// Mach CPU counters are wrapping 32-bit ticks. A first sample has no interval.
@@ -54,6 +55,30 @@ public struct ActivityProcess: Sendable, Identifiable {
     }
 }
 
+public struct PowerActivity: Sendable {
+    /// Nil when macOS withholds CPU energy from unprivileged readers (it then reports exactly 0).
+    public var cpuWatts, aneWatts, dramWatts: Double?
+    public let gpuWatts: Double
+    /// Whole-Mac power from the SMC (PSTR), readable without privileges.
+    public let systemWatts: Double?
+    public let efficiencyMHz, performanceMHz, gpuMHz: Double?
+    /// Fraction of time each cluster spent outside idle/off states, 0–1.
+    public let efficiencyActive, performanceActive, gpuActive: Double?
+    init(_ raw: BreezePower, systemWatts: Double?) {
+        // An active CPU never uses exactly 0 J over a sample, so 0 means withheld.
+        let cpuVisible = raw.cpu_watts > 0
+        cpuWatts = cpuVisible ? raw.cpu_watts : nil
+        aneWatts = cpuVisible ? raw.ane_watts : nil
+        dramWatts = cpuVisible && raw.dram_watts > 0 ? raw.dram_watts : nil
+        gpuWatts = raw.gpu_watts
+        self.systemWatts = systemWatts
+        func mhz(_ value: Double) -> Double? { value > 0 && value.isFinite ? value : nil }
+        func fraction(_ value: Double) -> Double? { (0...1).contains(value) ? value : nil }
+        efficiencyMHz = mhz(raw.ecpu_mhz); performanceMHz = mhz(raw.pcpu_mhz); gpuMHz = mhz(raw.gpu_mhz)
+        efficiencyActive = fraction(raw.ecpu_active); performanceActive = fraction(raw.pcpu_active); gpuActive = fraction(raw.gpu_active)
+    }
+}
+
 public struct ActivityReading: Sendable {
     public let date: Date
     public let cpu: CPUActivity?
@@ -63,6 +88,7 @@ public struct ActivityReading: Sendable {
     public let load: [Double]
     public let processes: [ActivityProcess]?
     public let processError: String?
+    public var power: PowerActivity? = nil
 }
 
 /// Separate from the cooling reader so process enumeration never delays its heartbeat.
@@ -71,10 +97,29 @@ public actor ActivityReader {
     private var processCPU: [ActivityProcess.ID: UInt64] = [:]
     private var processTime: TimeInterval?
     private var users: [UInt32: String] = [:]
+    // Accessed only on the actor; nonisolated(unsafe) lets deinit release it.
+    nonisolated(unsafe) private var power: UnsafeMutableRawPointer?
+    private var powerUnavailable = false
+    private var smc: SMC?
+    private var smcUnavailable = false
     public init() {}
+    deinit { breeze_power_close(power) }
 
     public func reset() {
         ticks = []; processCPU = [:]; processTime = nil
+        breeze_power_close(power); power = nil
+    }
+
+    private func readPower() -> PowerActivity? {
+        if power == nil && !powerUnavailable {
+            power = breeze_power_open()
+            powerUnavailable = power == nil
+        }
+        var raw = BreezePower()
+        guard let power, breeze_power_sample(power, &raw) == 0, raw.has_energy != 0 else { return nil }
+        if smc == nil && !smcUnavailable { smc = try? SMC(); smcUnavailable = smc == nil }
+        let system = smc?.number("PSTR").flatMap { $0 > 0 && $0 < 2000 ? $0 : nil }
+        return PowerActivity(raw, systemWatts: system)
     }
 
     public func read(includeProcesses: Bool) -> ActivityReading {
@@ -129,7 +174,8 @@ public actor ActivityReader {
             }
         } else { processCPU = [:]; processTime = nil }
         return ActivityReading(date: Date(), cpu: cpu, cores: cores, memory: memory, gpus: readGPUs(),
-                               load: loadCount > 0 ? Array(load.prefix(Int(loadCount))) : [], processes: processes, processError: error)
+                               load: loadCount > 0 ? Array(load.prefix(Int(loadCount))) : [], processes: processes, processError: error,
+                               power: readPower())
     }
 
     private func readGPUs() -> [GPUActivity] {

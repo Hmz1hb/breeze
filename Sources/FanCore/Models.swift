@@ -53,12 +53,14 @@ public enum Safety {
 }
 
 public struct Command: Codable, Sendable {
-    public enum Action: String, Codable, Sendable { case heartbeat, manual, configure, automatic, sleep, wake, quit }
+    public enum Action: String, Codable, Sendable { case heartbeat, manual, configure, automatic, sleep, wake, quit, charge }
     public let action: Action
     public let percent: Double?
     public let configuration: CoolingConfiguration?
-    public init(_ action: Action, percent: Double? = nil, configuration: CoolingConfiguration? = nil) {
-        self.action = action; self.percent = percent; self.configuration = configuration
+    public let charge: ChargeConfiguration?
+    public init(_ action: Action, percent: Double? = nil, configuration: CoolingConfiguration? = nil,
+                charge: ChargeConfiguration? = nil) {
+        self.action = action; self.percent = percent; self.configuration = configuration; self.charge = charge
     }
 }
 
@@ -70,9 +72,30 @@ public struct Reply: Codable, Sendable {
     public let boosted: Bool
     public let suspended: Bool
     public let mode: CoolingMode
+    /// Charge limiter status; nil while macOS manages charging.
+    public let charging: String?
+    public let chargingPaused: Bool?
+    public let toppingUp: Bool?
+    /// Why the MagSafe light override isn't applied; nil when it is, or none was requested.
+    public let magSafeLED: String?
+    /// IOReport CPU energy, which recent macOS shares only with privileged readers.
+    public let power: PrivilegedPower?
     public init(ok: Bool, message: String, manual: Bool, percent: Double? = nil,
-                boosted: Bool = false, suspended: Bool = false, mode: CoolingMode = .automatic) {
+                boosted: Bool = false, suspended: Bool = false, mode: CoolingMode = .automatic,
+                charging: String? = nil, chargingPaused: Bool? = nil, toppingUp: Bool? = nil, power: PrivilegedPower? = nil,
+                magSafeLED: String? = nil) {
         self.ok = ok; self.message = message; self.manual = manual
         self.percent = percent; self.boosted = boosted; self.suspended = suspended; self.mode = mode
+        self.charging = charging; self.chargingPaused = chargingPaused; self.toppingUp = toppingUp; self.power = power
+        self.magSafeLED = magSafeLED
+    }
+}
+
+public struct PrivilegedPower: Codable, Sendable {
+    public let cpuWatts: Double
+    public let aneWatts: Double
+    public let dramWatts: Double
+    public init(cpuWatts: Double, aneWatts: Double, dramWatts: Double) {
+        self.cpuWatts = cpuWatts; self.aneWatts = aneWatts; self.dramWatts = dramWatts
     }
 }

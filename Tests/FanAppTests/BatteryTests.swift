@@ -179,3 +179,8 @@ func batteryRejectsUnknownTimeEstimates(_ minutes: Int) {
     #expect(reading.voltage == nil)
     #expect(reading.condition == "Check Battery")
 }
+
+@Test func batteryTemperatureFallsBackToBatteryData() {
+    let reading = BatteryReading.parse(source: nil, registry: ["BatteryData": ["Temperature": 3_029]], adapter: nil)
+    #expect(reading.temperature == 30.29)
+}

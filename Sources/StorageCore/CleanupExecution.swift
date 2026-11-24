@@ -64,7 +64,8 @@ public enum CleanupExecution {
                 case .trash:
                     for resource in entry.resources {
                         try Task.checkCancellation()
-                        if let evidence = entry.duplicateEvidence { try validateDuplicate(evidence.keeper, evidence: evidence) }
+                        // Contents were hashed by validateDuplicates above; between moves an identity/size/mtime check suffices.
+                        if let evidence = entry.duplicateEvidence { try StorageScanner.validate(evidence.keeper, root: evidence.root) }
                         try CleanupFiles.validate(resource, application: entry.category == .applications && resource.url.pathExtension == "app")
                         try manager.trashItem(at: resource.url, resultingItemURL: nil)
                         trashed += 1

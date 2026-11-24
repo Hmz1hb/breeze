@@ -1,8 +1,19 @@
+import CHardware
 import Foundation
 import CoreLocation
 import Network
 import NetworkCore
 import Observation
+
+struct AppNetworkUsage: Identifiable {
+    var id: Int32 { pid }
+    let pid: Int32
+    let name: String
+    var download: Double = 0
+    var upload: Double = 0
+    var received: UInt64 = 0
+    var sent: UInt64 = 0
+}
 
 struct ConnectivitySample: Identifiable {
     let id = UUID()
@@ -38,6 +49,14 @@ final class NetworkModel {
     var speedMessage = "Measure your internet download and upload speed."
     @ObservationIgnored private var speedTask: Task<Void, Never>?
     @ObservationIgnored private var speedGeneration = UUID()
+    var appUsage: [Int32: AppNetworkUsage] = [:]
+    var appUsageError: String?
+    var appUsageSince: Date?
+    // Sorted by total so rows stay put while rates fluctuate.
+    var sortedAppUsage: [AppNetworkUsage] { appUsage.values.sorted { $0.received + $0.sent > $1.received + $1.sent } }
+    @ObservationIgnored private let appTraffic = AppTrafficReader()
+    @ObservationIgnored private var trafficBaseline: [Int32: (received: UInt64, sent: UInt64)] = [:]
+    @ObservationIgnored private var trafficLatest: [Int32: (received: UInt64, sent: UInt64)] = [:]
     var checkingPublic = false
     var internetChecks = UserDefaults.standard.object(forKey: "networkInternetChecks") as? Bool ?? true {
         didSet {
@@ -49,6 +68,7 @@ final class NetworkModel {
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var browsers: [NWBrowser] = []
     @ObservationIgnored private var resolvers: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var resolved: Set<String> = []
     @ObservationIgnored private var scanGeneration = UUID()
     @ObservationIgnored private var publicGeneration = UUID()
     @ObservationIgnored private let locationManager = CLLocationManager()
@@ -60,10 +80,12 @@ final class NetworkModel {
         configuration.httpCookieStorage = nil
         return URLSession(configuration: configuration)
     }()
-    enum Tab: String, CaseIterable { case activity = "Activity", devices = "Devices" }
+    enum Tab: String, CaseIterable { case activity = "Activity", apps = "Apps", devices = "Devices" }
     static let serviceTypes = ["_workstation._tcp", "_smb._tcp", "_ssh._tcp", "_airplay._tcp", "_raop._tcp",
                                "_googlecast._tcp", "_ipp._tcp", "_ipps._tcp", "_http._tcp", "_hap._tcp",
-                               "_companion-link._tcp", "_apple-mobdev2._tcp", "_rdlink._tcp", "_device-info._tcp"]
+                               "_companion-link._tcp", "_apple-mobdev2._tcp", "_rdlink._tcp", "_device-info._tcp",
+                               // iPhones and iPads advertise this even when they publish nothing else.
+                               "_remotepairing._tcp"]
 
     var subnet: LocalSubnet? {
         guard let ip = connection.ipv4, let mask = connection.netmask else { return nil }
@@ -108,6 +130,37 @@ final class NetworkModel {
         async let probing: Void = monitorInternet()
         _ = await (monitoring, probing)
     }
+
+    /// Per-process traffic for the whole app session, started at launch by AppModel. Totals include
+    /// connections that closed between reads; the poll rate only sets how fresh the rates are.
+    func monitorApps() async {
+        var previousDate = Date.now
+        while !Task.isCancelled {
+            if let rows = await appTraffic.read() {
+                guard !Task.isCancelled else { return }
+                if appUsageSince == nil { appUsageSince = .now }
+                let seconds = max(Date.now.timeIntervalSince(previousDate), 0.5)
+                previousDate = .now
+                var next: [Int32: AppNetworkUsage] = [:]
+                for row in rows {
+                    let before = trafficLatest[row.pid] ?? (0, 0), base = trafficBaseline[row.pid] ?? (0, 0)
+                    var usage = AppNetworkUsage(pid: row.pid, name: row.name)
+                    usage.download = Double(row.received &- before.received) / seconds
+                    usage.upload = Double(row.sent &- before.sent) / seconds
+                    usage.received = row.received &- base.received; usage.sent = row.sent &- base.sent
+                    trafficLatest[row.pid] = (row.received, row.sent)
+                    if usage.received + usage.sent > 0 { next[row.pid] = usage }
+                }
+                appUsage = next
+                appUsageError = nil
+            } else {
+                appUsageError = "macOS could not provide per-app traffic right now."
+            }
+            // Rates are only on screen in the Apps tab.
+            do { try await Task.sleep(for: .seconds(tab == .apps ? 1 : 5)) } catch { return }
+        }
+    }
+    func resetAppUsage() { trafficBaseline = trafficLatest; appUsage = [:]; appUsageSince = .now }
 
     private func monitorTraffic() async {
         var previous: NetworkCounters?
@@ -319,10 +372,12 @@ final class NetworkModel {
 
     private func resolve(_ result: NWBrowser.Result, type: String, generation: UUID) {
         guard case .service(let name, _, let domain, _) = result.endpoint,
-              result.interfaces.contains(where: { $0.name == connection.interface }),
-              let subnet, resolvers.count < 64 else { return }
+              result.interfaces.isEmpty || result.interfaces.contains(where: { $0.name == connection.interface }),
+              let subnet else { return }
+        // Each advertised service resolves once per scan. Busy Apple homes publish dozens.
         let key = result.endpoint.debugDescription
-        guard resolvers[key] == nil else { return }
+        guard !resolved.contains(key), resolved.count < 512 else { return }
+        resolved.insert(key)
         let interface = connection.interface
         resolvers[key] = Task { [weak self] in
             let devices = await LocalDiscovery.resolveService(name: name, type: type, domain: domain,
@@ -333,6 +388,25 @@ final class NetworkModel {
     }
     private func finishBonjour() {
         browsers.forEach { $0.cancel() }; browsers = []
-        resolvers.values.forEach { $0.cancel() }; resolvers = [:]
+        resolvers.values.forEach { $0.cancel() }; resolvers = [:]; resolved = []
     }
+}
+
+/// NetworkStatistics totals per process since launch. Reads block for up to a second, so they run on this actor.
+actor AppTrafficReader {
+    struct Row { let pid: Int32; let name: String; let received: UInt64; let sent: UInt64 }
+    nonisolated(unsafe) private var reader: UnsafeMutableRawPointer?
+    private var opened = false
+    private var rows = [BreezeAppTraffic](repeating: BreezeAppTraffic(), count: 2048)
+
+    func read() -> [Row]? {
+        if !opened { opened = true; reader = breeze_traffic_open() }
+        let count = Int(breeze_traffic_read(reader, &rows, Int32(rows.count)))
+        guard count >= 0 else { return nil }
+        return rows.prefix(count).map { row in
+            let name = withUnsafeBytes(of: row.name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            return Row(pid: row.pid, name: name.isEmpty ? "Process \(row.pid)" : name, received: row.received, sent: row.sent)
+        }
+    }
+    deinit { breeze_traffic_close(reader) }
 }

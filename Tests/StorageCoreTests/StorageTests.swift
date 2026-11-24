@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import StorageCore
 
-private struct Fixture {
+struct Fixture {
     let root: URL
     init() throws {
         // /private is intentionally excluded by the production scanner.

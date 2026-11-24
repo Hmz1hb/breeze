@@ -22,4 +22,21 @@ Progress and outcome: scan duration is unknown, so show live stage text with ind
 
 Footer: keep the selection summary, Clear, optional Ask AI and Review selection in one anchored action area. Clear stays in position and disables when empty. AI setup remains secondary. Review and finish have their own contextual action bars. Use shared 34-point controls throughout, mint for moving forward and red for approved removal or process stopping.
 
+Motion: `.interface-design/motion.md` is the full spec; `Sources/FanApp/BreezeMotion.swift` is the only source of durations, springs, transitions and motion helpers. Pages never hard-code animation values. Reduce Motion, Reduce Transparency and Increase Contrast are honoured inside that API. Hover treatments exist only as button styles (`.breezeCard`, `.breezeRow`, `.breezeTile`, `BreezeButtonStyle`), and keyboard focus shows the same state plus the 2-point mint ring. Perpetual motion runs only through the `breezeMotionLevel` gate.
+
+The five rules builders may not break:
+
+1. **Live telemetry never rolls.** Text fed by a sensor, a timer or a stream uses `breezeLive()`. Only values the user just caused, discrete results, countdowns and the hero RPM use `breezeNumeric`.
+2. **Nothing draws from 0.** Rings, meters and the battery vessel appear at their value and then follow it. A fan ring at 0 reads as "fans stopped".
+3. **Entrances once per session.** Reveals, chart draw-ins and path draws run the first time a page or element is shown after launch (`BreezeMotion.firstTime`). On every later visit the page transition is the only motion.
+4. **No scroll-linked effects.** Content below the fold simply exists. The only scroll response is the header hairline.
+5. **Exits are one value.** Every removal is an opacity fade of 0.20 s (`exit`). Direction lives on the insertion only.
+
+Two more global rules:
+
+- **Geometry-driven animation never runs on a size-only change.** Treemap rects, matched selection pills and chart domains animate when data or selection changes, not during live window resize. Key every such animation on the data (`.animation(_, value: ids)`), never implicitly.
+- **System presentations stay system-animated.** Sheets, `fileExporter`, menus, alerts and popovers are not wrapped, delayed or restyled.
+
+Type and rhythm: `BreezeStyle.Typography` (display 42 light rounded, title 28 semibold rounded, numeralL 27 and numeralM 21 medium rounded, eyebrow 9 semibold with 1.0 tracking) and 28-point page padding (`BreezeStyle.pagePadding`). Adopt them when a text or page is touched; no mass rename.
+
 Verification: follow AGENTS.md. Leave automated tests and UI checks to the user unless explicitly requested.

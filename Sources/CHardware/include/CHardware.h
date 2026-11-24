@@ -38,3 +38,26 @@ typedef struct {
     char name[256];
 } BreezeProcess;
 int breeze_processes(BreezeProcess *rows, int capacity);
+
+// IOReport energy and DVFS residency. MHz values are 0 and active values -1 when unavailable.
+typedef struct {
+    double cpu_watts, gpu_watts, ane_watts, dram_watts;
+    double ecpu_mhz, pcpu_mhz, gpu_mhz;
+    double ecpu_active, pcpu_active, gpu_active;
+    int has_energy;
+} BreezePower;
+void *breeze_power_open(void);
+// 0 = sample written, 1 = baseline only, -1 = unavailable.
+int breeze_power_sample(void *reader, BreezePower *out);
+void breeze_power_close(void *reader);
+
+// Per-process network bytes since breeze_traffic_open, from NetworkStatistics.framework.
+typedef struct {
+    int32_t pid;
+    char name[64];
+    uint64_t received, sent;
+} BreezeAppTraffic;
+void *breeze_traffic_open(void);
+// Number of rows written, or -1 when the reader is unavailable.
+int breeze_traffic_read(void *reader, BreezeAppTraffic *rows, int capacity);
+void breeze_traffic_close(void *reader);

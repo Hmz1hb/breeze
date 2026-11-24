@@ -45,23 +45,22 @@ struct StorageCleanupView: View {
     @Bindable var model: StorageCleanupModel
     @State private var showingFolders = false
     @State private var showingIssues = false
+    @State private var showingStartupItems = false
+    @AppStorage("cleanupAssistantClient") private var assistantClient = "codex"
+    @State private var reviewPulse = 0
+    @Namespace private var railSelection
+    @Namespace private var scopeSelection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.breezeMotionLevel) private var level
 
     var body: some View {
         VStack(spacing: 0) {
             journey
-            if let message = model.message { messageBanner(message) }
-            if let receipt = model.receipt {
-                StorageCleanupReceiptView(model: model, receipt: receipt)
-            } else if model.scanning || model.cleaning || model.stoppingProcesses {
-                StorageCleanupActivityView(model: model)
-            } else if model.showingReview {
-                StorageCleanupReview(model: model)
-            } else if let inventory = model.inventory {
-                assistantNotice
-                results(inventory)
-                footer
-            } else {
-                introduction
+            Group {
+                if let message = model.message { messageBanner(message).transition(.breezeDrop) }
+            }.breezeAnimation(.settle, value: model.message)
+            BreezeSwitcher(step.key, index: step.index, token: .glide) {
+                stepBody.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
         .breezeAction()
@@ -74,6 +73,7 @@ struct StorageCleanupView: View {
         .sheet(item: $model.inspected) { entry in StorageCleanupDetails(model: model, entry: entry) }
         .sheet(isPresented: $showingFolders) { projectFolders }
         .sheet(isPresented: $showingIssues) { scanIssues }
+        .sheet(isPresented: $showingStartupItems) { StartupItemsSheet { showingStartupItems = false } }
         .onChange(of: model.scope) { model.visibleRows = 100 }
         .onChange(of: model.risk) { model.visibleRows = 100 }
         .onChange(of: model.search) { model.visibleRows = 100 }
@@ -85,30 +85,86 @@ struct StorageCleanupView: View {
         }
     }
 
+    // Step order for direction: activity sits between the step that started it and the next one.
+    private var step: (key: String, index: Int) {
+        if model.receipt != nil { return ("receipt", 6) }
+        if model.scanning || model.cleaning || model.stoppingProcesses { return ("activity", model.workflowStep * 2 + 1) }
+        if model.showingReview { return ("review", 4) }
+        if model.inventory != nil { return ("results", 2) }
+        return ("intro", 0)
+    }
+
+    @ViewBuilder private var stepBody: some View {
+        if let receipt = model.receipt {
+            StorageCleanupReceiptView(model: model, receipt: receipt)
+        } else if model.scanning || model.cleaning || model.stoppingProcesses {
+            StorageCleanupActivityView(model: model)
+        } else if model.showingReview {
+            StorageCleanupReview(model: model)
+        } else if let inventory = model.inventory {
+            VStack(spacing: 0) {
+                VStack(spacing: 0) { assistantNotice }.breezeAnimation(.settle, value: noticeState)
+                results(inventory)
+                footer
+            }
+        } else {
+            introduction
+        }
+    }
+
     private var journey: some View {
-        HStack(spacing: 12) {
+        let current = model.workflowStep
+        return HStack(spacing: 12) {
             ForEach(Array(["Scan", "Choose", "Review", "Finish"].enumerated()), id: \.offset) { index, title in
                 HStack(spacing: 8) {
-                    Image(systemName: index < model.workflowStep ? "checkmark.circle.fill" : "\(index + 1).circle\(index == model.workflowStep ? ".fill" : "")")
-                        .foregroundStyle(index <= model.workflowStep ? BreezeStyle.mint : Color.secondary)
-                    Text(title).font(.caption.weight(index == model.workflowStep ? .semibold : .regular))
-                        .foregroundStyle(index == model.workflowStep ? .primary : .secondary)
-                }.accessibilityElement(children: .combine)
-                    .accessibilityLabel("Step \(index + 1), \(title)\(index == model.workflowStep ? ", current step" : "")")
-                if index < 3 { Rectangle().fill(.separator).frame(maxWidth: 48).frame(height: 1).accessibilityHidden(true) }
+                    Image(systemName: index < current ? "checkmark.circle.fill" : "\(index + 1).circle\(index == current ? ".fill" : "")")
+                        .foregroundStyle(index <= current ? BreezeStyle.mint : Color.secondary)
+                        .contentTransition(.symbolEffect(.replace))
+                    Text(title).font(.caption.weight(index == current ? .semibold : .regular))
+                        .foregroundStyle(index == current ? .primary : .secondary)
+                        .contentTransition(.interpolate)
+                        .breezeAnimation(.settle, value: current)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background {
+                    if index == current {
+                        let capsule = Capsule().fill(BreezeStyle.mint.opacity(0.12))
+                        if reduceMotion { capsule } else { capsule.matchedGeometryEffect(id: "current", in: railSelection) }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Step \(index + 1), \(title)\(index == current ? ", current step" : "")")
+                if index < 3 {
+                    // Fills from the leading edge; Reduce Motion swaps it in with a fade instead.
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(.separator)
+                        Rectangle().fill(BreezeStyle.mint)
+                            .scaleEffect(x: index < current || reduceMotion ? 1 : 0, anchor: .leading)
+                            .opacity(index < current ? 1 : 0)
+                    }.frame(maxWidth: 48).frame(height: 1).accessibilityHidden(true)
+                }
             }
             Spacer(minLength: 0)
-        }.padding(.horizontal, 28).padding(.bottom, 20)
+        }
+        .breezeAnimation(.glide, value: current)
+        .padding(.horizontal, 28).padding(.bottom, 20)
+    }
+
+    private var noticeState: String {
+        "\(model.assistantRunning)|\(model.assistantStatusVisible)|\(model.assistantStatus == nil)|\(model.assistantProposal?.id ?? "")"
     }
 
     @ViewBuilder private var assistantNotice: some View {
         if model.assistantRunning {
             HStack(spacing: 12) {
-                ProgressView().controlSize(.small)
+                Image(systemName: "sparkles").foregroundStyle(BreezeStyle.mint)
+                    .symbolEffect(.variableColor.iterative, isActive: model.assistantRunning && level.isActive)
+                    .accessibilityHidden(true)
                 Text("\(model.assistantClientName ?? "Your assistant") is finding cleanup opportunities…").font(.caption).frame(maxWidth: .infinity, alignment: .leading)
                 Button("Details") { model.showingAssistant = true }
                 Button("Stop analysis") { model.cancelAssistantAnalysis() }
             }.padding(12).breezeSurface(radius: 12).padding(.horizontal, 28).padding(.bottom, 12)
+                .transition(.breezeDrop)
         }
         if model.assistantStatusVisible, !model.assistantRunning, model.assistantProposal == nil,
            let status = model.assistantStatus {
@@ -117,6 +173,7 @@ struct StorageCleanupView: View {
                 Text(status).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 Button("AI options") { model.showingAssistant = true }
             }.padding(12).breezeSurface(radius: 12).padding(.horizontal, 28).padding(.bottom, 12)
+                .transition(.breezeDrop)
         }
         if let proposal = model.assistantProposal {
             HStack(spacing: 12) {
@@ -127,7 +184,10 @@ struct StorageCleanupView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 Button("Dismiss") { model.dismissAssistantProposal() }
                 Button("Review suggestions") { model.reviewAssistantProposal() }.breezeAction(prominent: true)
-            }.padding(14).breezeSurface(radius: 12).padding(.horizontal, 28).padding(.bottom, 12)
+            }.padding(14).breezeSurface(radius: 12)
+                .overlay { CleanupProposalBorder(proposalID: proposal.id, radius: 12).id(proposal.id) }
+                .padding(.horizontal, 28).padding(.bottom, 12)
+                .transition(.breezeDrop)
         }
     }
 
@@ -136,21 +196,27 @@ struct StorageCleanupView: View {
             VStack(alignment: .leading, spacing: 28) {
                 VStack(alignment: .leading, spacing: 12) {
                     Image(systemName: "internaldrive").font(.system(size: 40, weight: .light)).foregroundStyle(BreezeStyle.mint)
-                    Text("Make room. Keep what matters.").font(.system(size: 28, weight: .medium, design: .rounded))
-                    Text("Breeze finds caches, generated files and other storage you can review. Start with what can be rebuilt, then decide whether to go further.")
-                        .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .breezeReveal(0, key: "cleanup.intro")
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Make room. Keep what matters.").font(.system(size: 28, weight: .medium, design: .rounded))
+                        Text("Breeze finds caches, generated files and other storage you can review. Start with what can be rebuilt, then decide whether to go further.")
+                            .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }.breezeReveal(1, key: "cleanup.intro")
                 }
                 VStack(alignment: .leading, spacing: 20) {
                     feature("Find the space", symbol: "magnifyingglass", detail: "Scan virtual devices, system images, Downloads installers and duplicates, tool caches, projects, models and apps.")
                     feature("Choose what goes", symbol: "checklist", detail: "See what each item is, how it comes back, and whether an app is using it.")
                     feature("Review, then clear", symbol: "trash", detail: "Files move to Trash. Permanent tool removals are clearly separated and need your approval.")
-                }
-                HStack(spacing: 12) {
-                    Button("Find cleanup items", systemImage: "magnifyingglass") { model.scan() }.breezeAction(prominent: true)
-                    Button("Project folders…") { showingFolders = true }
-                }
-                Label("Scanning stays on this Mac and doesn’t change your files.", systemImage: "lock")
-                    .font(.caption).foregroundStyle(.secondary)
+                }.breezeReveal(2, key: "cleanup.intro")
+                VStack(alignment: .leading, spacing: 28) {
+                    HStack(spacing: 12) {
+                        Button("Find cleanup items", systemImage: "magnifyingglass") { model.scan() }.breezeAction(prominent: true)
+                        Button("Project folders…") { showingFolders = true }
+                        Button("Startup items…") { showingStartupItems = true }
+                    }
+                    Label("Scanning stays on this Mac and doesn’t change your files.", systemImage: "lock")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.breezeReveal(3, key: "cleanup.intro")
             }.frame(maxWidth: 760, alignment: .leading).padding(28).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -186,6 +252,7 @@ struct StorageCleanupView: View {
                 }
                 Spacer()
                 Button("Project folders…") { showingFolders = true }.disabled(model.busy)
+                Button("Startup items…") { showingStartupItems = true }
                 Button("Rescan", systemImage: "arrow.clockwise") { model.scan(preserving: model.selected) }.disabled(model.busy)
             }
             if model.requiresRescan {
@@ -221,7 +288,7 @@ struct StorageCleanupView: View {
                     Button("\(inventory.issues.count) scan notes") { showingIssues = true }
                 }
             }
-            DisclosureGroup("AI priorities (optional)") {
+            BreezeDisclosure("AI priorities (optional)") {
                 TextField("For example: reclaim 30 GB; keep my current iOS device and local models", text: $model.assistantGoal, axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.roundedBorder).disabled(model.assistantRunning)
             }.font(.caption)
@@ -239,6 +306,8 @@ struct StorageCleanupView: View {
                                     Button("Clear filters") { model.search = ""; model.risk = nil }.padding(.bottom, 16)
                                 }
                             }
+                            let revealed = model.visibleEntries.prefix(8).map(\.id)
+                            let revealKey = "cleanup.results.\(inventory.finished.timeIntervalSince1970)"
                             ForEach(CleanupCategory.allCases, id: \.self) { category in
                                 let items = Array(model.visibleEntries.prefix(model.visibleRows)).filter { $0.category == category }
                                 if !items.isEmpty {
@@ -248,7 +317,11 @@ struct StorageCleanupView: View {
                                         Text(cleanupSize(items.reduce(0) { $0 + $1.bytes })).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                                     }.padding(.vertical, 12)
                                     ForEach(items) { entry in
-                                        entryRow(entry)
+                                        if let index = revealed.firstIndex(of: entry.id) {
+                                            entryRow(entry).breezeReveal(index, key: revealKey)
+                                        } else {
+                                            entryRow(entry)
+                                        }
                                         Divider()
                                     }
                                 }
@@ -286,7 +359,7 @@ struct StorageCleanupView: View {
                 ForEach(CleanupCategory.allCases, id: \.self) { category in
                     categoryButton(.category(category), title: category.rawValue, symbol: category.symbol)
                 }
-            }
+            }.breezeAnimation(.glide, value: model.scope)
         }
     }
 
@@ -301,7 +374,12 @@ struct StorageCleanupView: View {
                 }
                 Spacer(minLength: 0)
             }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                .background(model.scope == scope ? BreezeStyle.mint.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                .background {
+                    if model.scope == scope {
+                        let fill = RoundedRectangle(cornerRadius: 10).fill(BreezeStyle.mint.opacity(0.12))
+                        if reduceMotion { fill } else { fill.matchedGeometryEffect(id: "scope", in: scopeSelection) }
+                    }
+                }
         }.buttonStyle(.plain).accessibilityAddTraits(model.scope == scope ? .isSelected : [])
     }
 
@@ -317,7 +395,8 @@ struct StorageCleanupView: View {
     }
 
     private func entryRow(_ entry: CleanupEntry) -> some View {
-        HStack(alignment: .top, spacing: 12) {
+        let isSelected = model.selected.contains(entry.id)
+        return HStack(alignment: .top, spacing: 12) {
             Toggle("Select \(entry.title)", isOn: Binding(get: { model.selected.contains(entry.id) }, set: { _ in model.toggle(entry) }))
                 .toggleStyle(.checkbox).labelsHidden().padding(.top, 4)
                 .disabled(model.busy || model.requiresRescan || !model.canSelect(entry))
@@ -347,6 +426,8 @@ struct StorageCleanupView: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).help("Inspect details, related projects, recovery and full paths")
         }.padding(.vertical, 14).padding(.horizontal, 4)
+            .background(BreezeStyle.mint.opacity(isSelected ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 8))
+            .breezeAnimation(.settle, value: isSelected)
     }
 
     private var footer: some View {
@@ -355,7 +436,8 @@ struct StorageCleanupView: View {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(model.selected.isEmpty ? "Choose items to continue" : "\(model.selected.count) selected · \(cleanupSize(model.selectedBytes)) estimated")
-                        .font(.subheadline.weight(.medium)).monospacedDigit()
+                        .font(.subheadline.weight(.medium))
+                        .breezeNumeric(model.selected.isEmpty ? nil : Double(model.selectedBytes))
                     Text(model.selectedEntries.contains { $0.blockedReason != nil } ? "Running apps will be handled in review." : "You’ll review removal and recovery before anything changes.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
@@ -363,12 +445,23 @@ struct StorageCleanupView: View {
                 Spacer(minLength: 8)
                 Button { model.showingAssistant = true } label: { Image(systemName: "slider.horizontal.3") }
                     .help("AI options and assistant preference").accessibilityLabel("AI options")
-                Button("Ask AI", systemImage: "sparkles") { model.askAssistant() }
+                // Click runs the saved assistant; the arrow switches it.
+                Menu {
+                    Picker("Assistant", selection: $assistantClient) {
+                        ForEach(CleanupAssistantClient.allCases, id: \.rawValue) { Text($0.name).tag($0.rawValue) }
+                    }.pickerStyle(.inline)
+                } label: {
+                    Label("Ask \(CleanupAssistantClient.detected(preferred: assistantClient)?.name ?? "AI")", systemImage: "sparkles")
+                } primaryAction: { model.askAssistant() }
+                    .fixedSize()
+                    .help("Click to analyze. Use the arrow to choose Codex or Claude Code.")
                     .disabled(model.busy || model.assistantRunning || model.requiresRescan)
                 Button("Review selection", systemImage: "arrow.right") { model.prepareReview() }
                     .breezeAction(prominent: true).disabled(model.selected.isEmpty || model.busy || model.requiresRescan)
+                    .breezePulse(trigger: reviewPulse)
             }.padding(.horizontal, 28).padding(.vertical, 16)
         }
+        .onChange(of: model.selected.isEmpty) { _, empty in if !empty { reviewPulse += 1 } }
     }
 
     private var projectFolders: some View {
@@ -422,6 +515,84 @@ struct StorageCleanupView: View {
                 Button("Done") { showingIssues = false }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 700, height: 480).breezeAction()
+    }
+}
+
+/// Read-only list of launchd jobs. Breeze never edits, unloads or removes them.
+private struct StartupItemsSheet: View {
+    let done: () -> Void
+    @State private var items: [StartupItem]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Startup items").font(.title2.weight(.semibold))
+            Text("Background jobs that launch at login or startup, read from LaunchAgents and LaunchDaemons. Breeze only lists them. Turn items off in Login Items & Extensions, or remove them with the app that installed them.")
+                .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if let items {
+                        if items.isEmpty { Text("No launch agents or daemons found.").foregroundStyle(.secondary).padding(.vertical, 12) }
+                        ForEach(StartupItem.Scope.allCases, id: \.self) { scope in
+                            let group = items.filter { $0.scope == scope }
+                            if !group.isEmpty {
+                                Text(scope.rawValue).font(.caption.weight(.semibold)).padding(.vertical, 12)
+                                ForEach(group) { item in row(item); Divider() }
+                            }
+                        }
+                    } else {
+                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 28)
+                    }
+                }
+            }
+            HStack {
+                Button("Login Items settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") { NSWorkspace.shared.open(url) }
+                }
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(28).frame(width: 700, height: 520).breezeAction()
+        .task { items = await StartupItems.list() }
+    }
+
+    private func row(_ item: StartupItem) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.label).font(.subheadline).textSelection(.enabled)
+                Text(item.program ?? item.id).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Text([item.disabled ? "Disabled" : nil, item.runsAtLoad ? "Runs at load" : nil, item.keepAlive ? "Kept alive" : nil]
+                    .compactMap { $0 }.joined(separator: " · ")).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }.breezeAction(size: .small)
+        }.padding(.vertical, 8)
+    }
+}
+
+/// Mint border drawn once per proposal (trim 0 to 1 over `l`); at rest on later shows, faded in under Reduce Motion.
+struct CleanupProposalBorder: View {
+    let radius: CGFloat
+    @State private var drawn: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(proposalID: String, radius: CGFloat) {
+        self.radius = radius
+        _drawn = State(initialValue: !BreezeMotion.firstTime("cleanup.proposal.\(proposalID)"))
+    }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius)
+            .trim(from: 0, to: drawn || reduceMotion ? 1 : 0)
+            .stroke(BreezeStyle.mint, lineWidth: 1.5)
+            .opacity(drawn || !reduceMotion ? 1 : 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onAppear {
+                guard !drawn else { return }
+                // The one-shot `draw` curve, sped up from xl to l.
+                withAnimation(reduceMotion ? BreezeMotion.reduced : BreezeMotion.draw.speed(BreezeMotion.xl / BreezeMotion.l)) { drawn = true }
+            }
     }
 }
 

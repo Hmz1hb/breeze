@@ -3,3 +3,8 @@ dist/
 .DS_Store
 .swiftpm/
 output/
+storage-test-*/
+.claude/
+.impeccable/
+.playwright-mcp/
+website/

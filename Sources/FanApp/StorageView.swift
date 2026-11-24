@@ -39,39 +39,14 @@ struct StorageView: View {
                     .disabled(model.busy || model.cleanup.busy)
                 Spacer()
             }.padding(.horizontal, 28).padding(.bottom, 20)
-            if model.workspace == .overview {
-                StorageOverviewView(monitor: model.monitor)
-            } else if model.workspace == .cleanup {
-                StorageCleanupView(model: model.cleanup)
-            } else {
-            if let message = model.message {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "info.circle").foregroundStyle(storageMint)
-                    Text(message).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                    Button { model.message = nil } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).accessibilityLabel("Dismiss message")
-                }.padding(12).background(storageMint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                    .padding(.horizontal, 28).padding(.bottom, 12)
-            }
-            if model.scanning {
-                HStack(spacing: 12) {
-                    ProgressView().controlSize(.small)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.progress).font(.subheadline.weight(.medium))
-                        Text("\(model.fileCount.formatted()) files found · your files stay on this Mac")
-                            .font(.caption).foregroundStyle(.secondary)
+            BreezeSwitcher(model.workspace, index: StorageModel.Workspace.allCases.firstIndex(of: model.workspace) ?? 0) {
+                VStack(spacing: 0) {
+                    switch model.workspace {
+                    case .overview: StorageOverviewView(monitor: model.monitor)
+                    case .cleanup: StorageCleanupView(model: model.cleanup)
+                    case .files: filesWorkspace
                     }
-                    Spacer()
-                    Button("Cancel") { model.cancel() }
-                }.padding(16).breezeSurface(radius: 18)
-                    .padding(.horizontal, 28).padding(.bottom, 16)
-            }
-            if let scan = model.scan {
-                results(scan).disabled(model.cleaning)
-            } else {
-                emptyState
-            }
-            footer
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -86,14 +61,45 @@ struct StorageView: View {
         .task { await model.monitor.run() }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Storage").font(.system(size: 28, weight: .semibold, design: .rounded))
-                Text(subtitle)
-                    .font(.subheadline).foregroundStyle(.secondary)
+    @ViewBuilder private var filesWorkspace: some View {
+        VStack(spacing: 0) {
+            if let message = model.message {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "info.circle").foregroundStyle(storageMint)
+                    Text(message).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    Button { model.message = nil } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).accessibilityLabel("Dismiss message")
+                }.padding(12).background(storageMint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 28).padding(.bottom, 12)
+                    .transition(.breezeDrop)
             }
-            Spacer()
+            if model.scanning {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.progress).font(.subheadline.weight(.medium))
+                        Text("\(model.fileCount.formatted()) files found · your files stay on this Mac")
+                            .font(.caption).foregroundStyle(.secondary).breezeLive()
+                    }
+                    Spacer()
+                    Button("Cancel") { model.cancel() }
+                }.padding(16).breezeSurface(radius: 18)
+                    .padding(.horizontal, 28).padding(.bottom, 16)
+                    .transition(.breezeDrop)
+            }
+            if let scan = model.scan {
+                results(scan).disabled(model.cleaning)
+            } else {
+                emptyState
+            }
+            footer
+        }
+        .breezeAnimation(.settle, value: model.message)
+        .breezeAnimation(.settle, value: model.scanning)
+    }
+
+    private var header: some View {
+        BreezePageHeader("Storage", subtitle: subtitle) {
             if let scan = model.scan, model.workspace == .files {
                 Button { model.start(scan.root) } label: { Image(systemName: "arrow.clockwise") }
                     .help("Rescan this folder").accessibilityLabel("Rescan folder").disabled(model.busy)
@@ -102,7 +108,7 @@ struct StorageView: View {
                 Button("Choose folder", systemImage: "folder.badge.plus") { model.chooseFolder() }
                     .breezeAction(prominent: true).disabled(model.busy || model.cleanup.busy)
             }
-        }.padding(.horizontal, 28).padding(.top, 32).padding(.bottom, 20)
+        }
     }
 
     private var subtitle: String {
@@ -139,12 +145,14 @@ struct StorageView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(storageSize(scan.bytes)).font(.system(size: 34, weight: .light, design: .rounded)).monospacedDigit()
                     Text("\(scan.files.count.formatted()) scanned files").font(.caption).foregroundStyle(.secondary)
-                }
+                }.breezeReveal(0, key: "storage.scan.\(scan.root.path)")
                 Divider().frame(height: 40)
                 summaryValue(storageSize(scan.extraDuplicateBytes), label: "in extra duplicate copies")
+                    .breezeReveal(1, key: "storage.scan.\(scan.root.path)")
                 summaryValue(model.suggestedFiles.count.formatted(), label: "files worth reviewing")
+                    .breezeReveal(2, key: "storage.scan.\(scan.root.path)")
                 Spacer(minLength: 0)
-            }
+            }.id(scan.root.path) // scan id: a newly scanned folder reveals once per session; values are final at once
             Picker("Storage view", selection: $model.tab) {
                 ForEach(StorageModel.Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented).labelsHidden()
@@ -155,10 +163,14 @@ struct StorageView: View {
                         Label("Partial results: \(scan.unreadable) unreadable locations; \(scan.duplicateReadFailures) duplicate checks unavailable.\(scan.reachedLimit ? " The 250,000-file limit was reached; scan a smaller folder." : "")", systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
-                    switch model.tab {
-                    case .map: mapContents(scan)
-                    case .duplicates: duplicateContents(scan)
-                    case .suggestions: suggestionContents
+                    BreezeSwitcher(model.tab, index: StorageModel.Tab.allCases.firstIndex(of: model.tab) ?? 0) {
+                        VStack(alignment: .leading, spacing: 16) {
+                            switch model.tab {
+                            case .map: mapContents(scan)
+                            case .duplicates: duplicateContents(scan)
+                            case .suggestions: suggestionContents
+                            }
+                        }
                     }
                     Text("Scope: \(scan.root.path)\nHidden items, system data, libraries, app bundles, links and iCloud-managed files are excluded. \(scan.skipped) additional items skipped. Sizes describe scanned files, not the entire disk. APFS copies can share disk blocks, so cleanup totals are estimates.")
                         .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
@@ -193,15 +205,18 @@ struct StorageView: View {
             ScrollView(.horizontal) {
                 HStack(spacing: 8) {
                     ForEach(breadcrumbs(scan), id: \.path) { folder in
-                        if folder.path != scan.root.path {
-                            Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
-                        }
-                        Button(folder.lastPathComponent.isEmpty ? "Scan root" : folder.lastPathComponent) { model.focus(folder) }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(folder == model.focusedFolder ? Color.primary : storageMint)
-                            .help(folder.path)
+                        HStack(spacing: 8) {
+                            if folder.path != scan.root.path {
+                                Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+                            }
+                            Button(folder.lastPathComponent.isEmpty ? "Scan root" : folder.lastPathComponent) { model.focus(folder) }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(folder == model.focusedFolder ? Color.primary : storageMint)
+                                .help(folder.path)
+                        }.transition(.breezeDrop)
                     }
                 }.font(.subheadline)
+                    .breezeAnimation(.settle, value: model.focusedFolder?.path)
             }.scrollIndicators(.hidden)
         }.padding(12).breezeSurface(radius: 16)
 
@@ -213,7 +228,7 @@ struct StorageView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button { showingMap.toggle() } label: {
+            Button { BreezeMotion.animate(.glide) { showingMap.toggle() } } label: {
                 Label(showingMap ? "Hide map" : "Show space map", systemImage: "square.split.2x2")
             }.controlSize(.small)
         }.padding(.vertical, 4)
@@ -223,7 +238,8 @@ struct StorageView: View {
         } else {
             if showingMap {
                 VStack(alignment: .leading, spacing: 10) {
-                    StorageMapView(nodes: model.nodes, action: model.inspect).frame(height: 180)
+                    StorageMapView(folder: (model.focusedFolder ?? scan.root).path, nodes: model.nodes,
+                                   animatesLayout: !model.scanning, action: model.inspect).frame(height: 180)
                     HStack(spacing: 12) {
                         ForEach(FileCategory.allCases, id: \.self) { category in
                             HStack(spacing: 4) {
@@ -234,7 +250,7 @@ struct StorageView: View {
                         Spacer(minLength: 0)
                         Text("Size = area").font(.caption2).foregroundStyle(.secondary)
                     }
-                }
+                }.transition(.breezeFade)
             }
             VStack(spacing: 0) {
                 HStack {
@@ -273,16 +289,14 @@ struct StorageView: View {
                             Text(fraction, format: .percent.precision(.fractionLength(0)))
                                 .foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
                         }.font(.caption)
-                        GeometryReader { geometry in
-                            Capsule().fill(.quaternary)
-                            Capsule().fill(node.isDirectory ? storageMint : node.category.color)
-                                .frame(width: max(fraction > 0 ? 2 : 0, geometry.size.width * fraction))
-                        }.frame(width: 120, height: 3)
+                        BreezeMeter(fraction: fraction, tint: node.isDirectory ? storageMint : node.category.color, height: 3)
+                            .frame(width: 120)
                     }.frame(width: 158, alignment: .trailing)
                     Image(systemName: node.isDirectory ? "chevron.right" : "eye")
                         .font(.caption).foregroundStyle(.secondary).frame(width: 20)
+                        .breezeNudge(x: node.isDirectory ? 2 : 0)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).help(node.isDirectory ? "Open \(node.url.lastPathComponent)" : "Preview \(node.url.lastPathComponent)")
+            }.buttonStyle(.breezeRow).help(node.isDirectory ? "Open \(node.url.lastPathComponent)" : "Preview \(node.url.lastPathComponent)")
         }.padding(.horizontal, 14).padding(.vertical, 12)
             .overlay(alignment: .bottom) { Divider().opacity(0.5).padding(.leading, 46) }
     }
@@ -332,7 +346,7 @@ struct StorageView: View {
     private func selectionToggle(_ file: StorageFile) -> some View {
         Toggle("Select \(file.url.lastPathComponent)", isOn: Binding(
             get: { model.selection.contains(file.id) }, set: { _ in model.toggle(file) }
-        )).labelsHidden().toggleStyle(.checkbox).disabled(model.busy || model.scan?.duplicatesComplete != true)
+        )).labelsHidden().toggleStyle(StorageCheckboxStyle()).disabled(model.busy || model.scan?.duplicatesComplete != true)
     }
 
     private func fileRow(_ file: StorageFile, reason: String? = nil) -> some View {
@@ -348,7 +362,7 @@ struct StorageView: View {
                         if let reason { Text(reason).font(.caption2).foregroundStyle(storageMint) }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain).help("Preview \(file.url.lastPathComponent)")
+            }.buttonStyle(.breezeRow).help("Preview \(file.url.lastPathComponent)")
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 4) {
                 Text(storageSize(file.bytes)).font(.subheadline).monospacedDigit()
@@ -381,7 +395,9 @@ struct StorageView: View {
                     Label("Nothing selected. Your files stay put until you review.", systemImage: "checkmark.shield")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("\(model.selection.count) selected · \(storageSize(model.selectedBytes))").font(.subheadline).monospacedDigit()
+                    let bytes = model.selectedBytes
+                    Text("\(model.selection.count) selected · \(storageSize(bytes))").font(.subheadline)
+                        .breezeNumeric(Double(bytes))
                     Button("Clear selection") { model.selection = [] }.disabled(model.busy)
                 }
                 Spacer()
@@ -531,39 +547,174 @@ private struct StorageReviewView: View {
     }
 }
 
+/// Checkbox whose mark morphs with a symbol replace; keeps the native toggle's accessibility.
+private struct StorageCheckboxStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View { Box(configuration: configuration) }
+
+    private struct Box: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var enabled
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+        var body: some View {
+            Button { configuration.isOn.toggle() } label: {
+                Image(systemName: configuration.isOn ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 15))
+                    .foregroundStyle(configuration.isOn ? storageMint : .secondary)
+                    .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
+                    .breezeAnimation(.settle, value: configuration.isOn)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .opacity(enabled ? 1 : 0.5)
+            .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
+        }
+    }
+}
+
+/// One treemap tile placed by `.position`; `id` is the node path, or a fixed id for the overflow tile.
+private struct PlacedTile: Identifiable {
+    let id: String
+    let node: StorageNode?
+    let rect: CGRect
+}
+
+/// Insertion of a new map level: from the zoom transform to identity. The old level leaves with `exit`.
+private struct MapZoom: Transition {
+    let scale: CGSize
+    let offset: CGSize
+    func body(content: Content, phase: TransitionPhase) -> some View {
+        content
+            .scaleEffect(x: phase.isIdentity ? 1 : scale.width, y: phase.isIdentity ? 1 : scale.height, anchor: .topLeading)
+            .offset(phase.isIdentity ? .zero : offset)
+            .opacity(phase.isIdentity ? 1 : 0)
+    }
+}
+
+/// Remembers the shown folder and its tile rects so a folder change can zoom from (or to) the right tile.
+/// Non-observable on purpose: written during body, never triggers a render.
+private final class MapZoomBox {
+    private var folder: String?
+    private var rects: [String: CGRect] = [:]
+    private var current: MapZoom?
+
+    func zoom(for folder: String, tiles: [PlacedTile], size: CGSize, enabled: Bool) -> MapZoom? {
+        defer { rects = Dictionary(tiles.map { ($0.id, $0.rect) }, uniquingKeysWith: { first, _ in first }) }
+        guard folder != self.folder else { return current }
+        let previous = self.folder
+        self.folder = folder
+        current = nil
+        guard enabled, let previous, size.width > 0, size.height > 0 else { return nil }
+        if let child = Self.child(of: previous, toward: folder), let rect = rects[child], rect.width > 0, rect.height > 0 {
+            // Drill in: the new level starts inside the tile that was clicked.
+            current = MapZoom(scale: CGSize(width: rect.width / size.width, height: rect.height / size.height),
+                              offset: CGSize(width: rect.minX, height: rect.minY))
+        } else if let child = Self.child(of: folder, toward: previous),
+                  let rect = tiles.first(where: { $0.id == child })?.rect, rect.width > 0, rect.height > 0 {
+            // Drill up: the parent starts zoomed in on the child's tile; crossfade when that zoom is extreme.
+            let sx = size.width / rect.width, sy = size.height / rect.height
+            if sx <= 8, sy <= 8 {
+                current = MapZoom(scale: CGSize(width: sx, height: sy), offset: CGSize(width: -rect.minX * sx, height: -rect.minY * sy))
+            }
+        }
+        return current
+    }
+
+    /// The immediate child path of `ancestor` on the way to `descendant`, or nil when it is not a descendant.
+    private static func child(of ancestor: String, toward descendant: String) -> String? {
+        let prefix = ancestor == "/" ? "/" : ancestor + "/"
+        guard descendant.hasPrefix(prefix), let first = descendant.dropFirst(prefix.count).split(separator: "/").first else { return nil }
+        return prefix + first
+    }
+}
+
 private struct StorageMapView: View {
+    let folder: String
     let nodes: [StorageNode]
+    /// False while a scan streams in, so partial results never morph.
+    let animatesLayout: Bool
     let action: (StorageNode) -> Void
-    @Environment(\.colorScheme) private var colorScheme
+    @State private var box = MapZoomBox()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         GeometryReader { geometry in
-            let shown = Array(nodes.prefix(100))
-            let remaining = nodes.dropFirst(100).reduce(0) { $0 + $1.bytes }
-            let weights = shown.map(\.bytes) + (remaining > 0 ? [remaining] : [])
-            let tiles = StorageTreemap.layout(weights: weights, in: CGRect(origin: .zero, size: geometry.size))
-            ZStack(alignment: .topLeading) {
-                ForEach(tiles, id: \.index) { tile in
-                    if tile.index < shown.count {
-                        let node = shown[tile.index]
+            let size = geometry.size
+            let tiles = Self.place(nodes, in: size)
+            let zoom = box.zoom(for: folder, tiles: tiles, size: size, enabled: !reduceMotion)
+            StorageMapLevel(tiles: tiles, total: nodes.count, size: size, fadesLabels: zoom != nil,
+                            animatesLayout: animatesLayout, action: action)
+                .id(folder)
+                .transition(.asymmetric(insertion: zoom.map { AnyTransition($0) } ?? .opacity,
+                                        removal: AnyTransition.opacity.animation(BreezeMotion.animation(.exit, reduceMotion: reduceMotion))))
+        }
+        .clipped()
+        .breezeAnimation(.glide, value: folder)
+    }
+
+    private static func place(_ nodes: [StorageNode], in size: CGSize) -> [PlacedTile] {
+        let shown = Array(nodes.prefix(100))
+        let remaining = nodes.dropFirst(100).reduce(0) { $0 + $1.bytes }
+        let weights = shown.map(\.bytes) + (remaining > 0 ? [remaining] : [])
+        return StorageTreemap.layout(weights: weights, in: CGRect(origin: .zero, size: size)).map { tile in
+            tile.index < shown.count
+                ? PlacedTile(id: shown[tile.index].id, node: shown[tile.index], rect: tile.rect)
+                : PlacedTile(id: "storage.map.more", node: nil, rect: tile.rect)
+        }
+    }
+}
+
+private struct StorageMapLevel: View {
+    let tiles: [PlacedTile]
+    let total: Int
+    let size: CGSize
+    let animatesLayout: Bool
+    let action: (StorageNode) -> Void
+    @State private var labelsShown: Bool
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(tiles: [PlacedTile], total: Int, size: CGSize, fadesLabels: Bool, animatesLayout: Bool, action: @escaping (StorageNode) -> Void) {
+        self.tiles = tiles
+        self.total = total
+        self.size = size
+        self.animatesLayout = animatesLayout
+        self.action = action
+        _labelsShown = State(initialValue: !fadesLabels)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(tiles) { tile in
+                let rect = tile.rect
+                Group {
+                    if let node = tile.node {
                         Button { action(node) } label: {
                             tileLabel(node.url.lastPathComponent, detail: storageSize(node.bytes),
-                                      symbol: node.isDirectory ? "folder" : "doc", rect: tile.rect)
-                                .frame(width: max(0, tile.rect.width - 3), height: max(0, tile.rect.height - 3))
+                                      symbol: node.isDirectory ? "folder" : "doc", rect: rect)
+                                .frame(width: max(0, rect.width - 3), height: max(0, rect.height - 3))
                                 .background(node.category.color.opacity(colorScheme == .dark ? 0.32 : 0.18), in: RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(node.category.color.opacity(0.25)))
-                                .contentShape(Rectangle())
-                        }.buttonStyle(.plain).offset(x: tile.rect.minX, y: tile.rect.minY)
+                        }.buttonStyle(.breezeTile)
                             .help("\(node.url.path) · \(storageSize(node.bytes))")
                             .accessibilityLabel("\(node.url.lastPathComponent), \(storageSize(node.bytes))\(node.isDirectory ? ", open folder" : ", show file")")
                     } else {
-                        tileLabel("\(nodes.count - 100) more items", detail: "See list below", symbol: "ellipsis", rect: tile.rect)
-                            .frame(width: max(0, tile.rect.width - 3), height: max(0, tile.rect.height - 3))
+                        tileLabel("\(total - 100) more items", detail: "See list below", symbol: "ellipsis", rect: rect)
+                            .frame(width: max(0, rect.width - 3), height: max(0, rect.height - 3))
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                            .offset(x: tile.rect.minX, y: tile.rect.minY)
                     }
                 }
+                .position(x: rect.minX + max(0, rect.width - 3) / 2, y: rect.minY + max(0, rect.height - 3) / 2)
+                .transition(.breezeFade)
             }
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        // Keyed on the tile set: deletion morphs, a window resize or a streaming scan does not.
+        .animation(animatesLayout ? BreezeMotion.animation(.glide, reduceMotion: reduceMotion) : nil, value: tiles.map(\.id))
+        .onAppear {
+            guard !labelsShown else { return }
+            withAnimation(BreezeMotion.animation(.enter, reduceMotion: reduceMotion).delay(BreezeMotion.l / 2)) { labelsShown = true }
         }
     }
 
@@ -576,5 +727,6 @@ private struct StorageMapView: View {
             }
         }.padding(min(12, max(0, rect.width / 8)))
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading).clipped()
+            .opacity(labelsShown ? 1 : 0)
     }
 }

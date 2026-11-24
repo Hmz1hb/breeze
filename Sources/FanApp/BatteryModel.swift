@@ -130,7 +130,8 @@ struct BatteryReading: Sendable {
         if result.remainingCapacity == nil, result.fullChargeCapacity != nil,
            let maximum = number(registry, "MaxCapacity"), maximum > 100,
            let current = number(registry, "CurrentCapacity"), current >= 0 { result.remainingCapacity = current }
-        if let raw = positive(number(registry, "Temperature")) {
+        // macOS 27 publishes Temperature only inside BatteryData (0.01 °C).
+        if let raw = positive(number(registry, "Temperature") ?? number(data, "Temperature")) {
             let celsius = raw / 100
             if (0...100).contains(celsius) { result.temperature = celsius }
         }

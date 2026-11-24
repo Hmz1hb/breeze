@@ -81,7 +81,14 @@ enum CleanupCatalog {
         .init(title: "Xcode archive", path: "Library/Developer/Xcode/Archives", category: .xcode, risk: .personal,
               detail: "Release archives and debug symbols. These may be needed for distribution and crash symbolication.",
               recovery: "Restore from Trash or a backup. An identical archive may not be reproducible.", children: true,
-              owners: ["com.apple.dt.Xcode"], processes: ["xcodebuild"])
+              owners: ["com.apple.dt.Xcode"], processes: ["xcodebuild"]),
+        .init(title: "Xcode documentation cache", path: "Library/Developer/Xcode/DocumentationCache", category: .xcode,
+              detail: "Downloaded and indexed developer documentation. Xcode rebuilds it when documentation is next opened.",
+              owners: ["com.apple.dt.Xcode"]),
+        .init(title: "Simulator logs", path: "Library/Logs/CoreSimulator", category: .xcode, risk: .review,
+              detail: "Simulator and device diagnostic logs. Keep them if you are investigating a simulator crash.",
+              recovery: "New logs are generated. Existing logs can only be restored from Trash.",
+              owners: ["com.apple.iphonesimulator"], processes: ["simctl"])
     ]
 
     struct ProjectRule: Sendable {

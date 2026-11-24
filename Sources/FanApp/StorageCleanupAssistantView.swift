@@ -6,11 +6,14 @@ struct StorageCleanupAssistantView: View {
     @Bindable var model: StorageCleanupModel
     @Environment(\.dismiss) private var dismiss
     @AppStorage("cleanupAssistantClient") private var client = "codex"
+    @Environment(\.breezeMotionLevel) private var level
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
                 Image(systemName: "sparkles").font(.title2).foregroundStyle(BreezeStyle.mint)
+                    .symbolEffect(.variableColor.iterative, isActive: model.assistantRunning && level.isActive)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("AI options").font(.title2.weight(.semibold))
                     Text("Ask AI detects your assistant and starts from the cleanup screen. Customize it here if needed.").font(.subheadline).foregroundStyle(.secondary)
@@ -25,13 +28,16 @@ struct StorageCleanupAssistantView: View {
                     if client == "other" {
                         connection
                     } else {
-                        DisclosureGroup("Manual connection and copy options") { connection.padding(.top, 12) }
+                        BreezeDisclosure("Manual connection and copy options") { connection.padding(.top, 12) }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let status = model.assistantStatus {
-                Text(status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-            }
+            Group {
+                if let status = model.assistantStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        .transition(.breezeDrop)
+                }
+            }.breezeAnimation(.settle, value: model.assistantStatus == nil)
             HStack {
                 Button("Check for proposal") { model.receiveAssistantProposal() }
                     .disabled(!model.assistantSharing || model.assistantSnapshot == nil || model.busy || model.assistantRunning)
@@ -127,8 +133,8 @@ struct StorageCleanupAssistantView: View {
                     .breezeAction(prominent: true)
                     .disabled(model.assistantRunning || !model.assistantSharing || model.assistantSnapshot == nil || model.busy || model.requiresRescan || model.assistantExecutable == nil)
                     if model.assistantRunning {
-                        ProgressView().controlSize(.small)
-                        Button("Stop") { model.cancelAssistantAnalysis() }
+                        ProgressView().controlSize(.small).transition(.breezeFade)
+                        Button("Stop") { model.cancelAssistantAnalysis() }.transition(.breezeFade)
                     }
                 }
                 Text("Uses your CLI's existing sign-in and usage allowance. No setup command or copying is needed. The assistant reads the shared scan and returns a proposal; you approve removal in Breeze.")
@@ -144,14 +150,22 @@ struct StorageCleanupAssistantView: View {
                         dismiss()
                     }.disabled(model.busy || model.requiresRescan || model.assistantRunning)
                 }
+                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .overlay { CleanupProposalBorder(proposalID: proposal.id, radius: 10).id(proposal.id) }
+                .transition(.breezeDrop)
             }
             if let response = model.assistantResponse {
-                DisclosureGroup("Assistant response") {
+                BreezeDisclosure("Assistant response") {
                     Text(response).font(.caption).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
-                }
+                }.transition(.breezeDrop)
             }
         }
+        .breezeAnimation(.settle, value: conversationState)
+    }
+
+    private var conversationState: String {
+        "\(model.assistantRunning)|\(model.assistantProposal?.id ?? "")|\(model.assistantResponse == nil)"
     }
 
     private func code(_ text: String) -> some View {

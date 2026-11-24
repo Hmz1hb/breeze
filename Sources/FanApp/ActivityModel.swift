@@ -17,6 +17,9 @@ final class ActivityModel {
     let logicalCores = ProcessInfo.processInfo.processorCount
     let physicalCores = ActivityHardware.integer("hw.physicalcpu")
     private let reader = ActivityReader()
+    /// Latest CPU energy from the root helper, used when macOS withholds it from the app.
+    var helperPower: (value: PrivilegedPower, date: Date)?
+    var connectHelper: (() -> Void)?
 
     var samples: [ActivityReading] {
         guard let date = latest?.date else { return [] }
@@ -31,8 +34,13 @@ final class ActivityModel {
             if !paused && readingEnabled {
                 if needsBaseline { await reader.reset(); needsBaseline = false }
                 let readsProcesses = tab == .processes || includeProcesses()
-                let reading = await reader.read(includeProcesses: readsProcesses)
+                var reading = await reader.read(includeProcesses: readsProcesses)
                 guard !Task.isCancelled else { return }
+                if reading.power?.cpuWatts == nil, let helper = helperPower, Date().timeIntervalSince(helper.date) < 5 {
+                    reading.power?.cpuWatts = helper.value.cpuWatts
+                    reading.power?.aneWatts = helper.value.aneWatts
+                    reading.power?.dramWatts = helper.value.dramWatts > 0 ? helper.value.dramWatts : nil
+                }
                 latest = reading
                 history.append(reading)
                 history.removeAll { $0.date < reading.date.addingTimeInterval(-600) }
