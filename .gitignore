@@ -4,3 +4,7 @@ dist/
 .swiftpm/
 output/
 storage-test-*/
+.claude/
+.impeccable/
+.playwright-mcp/
+website/

@@ -176,7 +176,8 @@ Runtime testing and UI verification are left to the user under `AGENTS.md`.
 ## Build and open
 
 ```sh
-cd /Users/Apple/Desktop/projects/fancontroll
+git clone https://github.com/Hmz1hb/breeze.git
+cd breeze
 zsh scripts/build.sh
 ditto dist/Breeze.app /Applications/Breeze.app
 open /Applications/Breeze.app
@@ -255,3 +256,11 @@ AppleSMC is a private IOKit service. Its user-client packet and key conventions 
 - [Apple launch-at-login service](https://developer.apple.com/documentation/servicemanagement/smappservice/mainapp)
 
 Breeze discovers `FNum`, actual/min/max/target RPM, uppercase/lowercase fan-mode keys and an `Ftst` activation fallback at runtime.
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Breeze is free software under the [GNU General Public License v3.0](LICENSE). You may use, modify and redistribute it, but any app you distribute that includes Breeze code must also be released under the GPL with its complete source.

@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in Breeze doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Cooling
+        2. Apply the Quiet preset
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Breeze version or commit
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model and macOS version
+      placeholder: MacBook Pro 14" M3 Pro, macOS 26.1
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Cooling / fans, Battery, Statistics, Network, Storage / cleanup, Menu bar / widgets, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Helper status or logs
+      description: Output of `/Applications/Breeze.app/Contents/MacOS/BreezeHelper --status`, if relevant.
+      render: text
