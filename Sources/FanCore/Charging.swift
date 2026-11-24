@@ -1,6 +1,14 @@
 import Foundation
 import IOKit
 
+/// SMC `ACLC` values (1 byte). Writing 0 hands the light back to macOS.
+public enum MagSafeLED: UInt8, Codable, CaseIterable, Sendable {
+    case off = 1, green = 3, orange = 4
+    public var name: String {
+        switch self { case .off: "Off"; case .green: "Green"; case .orange: "Orange" }
+    }
+}
+
 /// Charge limiting runs in the helper only while a Breeze control session is connected.
 /// Ending the session always re-enables charging.
 public struct ChargeConfiguration: Codable, Equatable, Sendable {
@@ -17,9 +25,13 @@ public struct ChargeConfiguration: Codable, Equatable, Sendable {
     public var pauseDuringSleep: Bool?
     /// Run from the battery while plugged in until it falls to the limit.
     public var discharge: Bool?
+    /// MagSafe light override; nil leaves it to macOS. Independent of the limiter.
+    public var magSafeLED: MagSafeLED?
     public init() {}
 
     public var isActive: Bool { enabled || heatProtection }
+    /// The helper session is needed for the limiter or a MagSafe light override.
+    public var needsHelper: Bool { isActive || magSafeLED != nil }
 
     public func validate() throws {
         guard limit.isFinite, (50...100).contains(limit), sailing.isFinite, (0...20).contains(sailing),
@@ -34,8 +46,11 @@ public struct BatteryState: Sendable {
     public let percent: Double?
     public let temperature: Double?
     public let externalConnected: Bool
-    public init(percent: Double?, temperature: Double?, externalConnected: Bool) {
+    /// Whether current is flowing into the battery right now (`IsCharging`), nil if unreadable.
+    public let charging: Bool?
+    public init(percent: Double?, temperature: Double?, externalConnected: Bool, charging: Bool? = nil) {
         self.percent = percent; self.temperature = temperature; self.externalConnected = externalConnected
+        self.charging = charging
     }
 
     public static func read() -> BatteryState? {
@@ -50,10 +65,42 @@ public struct BatteryState: Sendable {
         if let current = number("CurrentCapacity"), let maximum = number("MaxCapacity"), maximum > 0, current >= 0 {
             percent = min(100, current / maximum * 100)
         }
-        let temperature = number("Temperature").map { $0 / 100 }.flatMap { (0...100).contains($0) ? $0 : nil }
+        // macOS 27 publishes Temperature only inside BatteryData (0.01 °C).
+        let data = IORegistryEntryCreateCFProperty(service, "BatteryData" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? [String: Any]
+        let temperature = (number("Temperature") ?? (data?["Temperature"] as? NSNumber)?.doubleValue)
+            .map { $0 / 100 }.flatMap { (0...100).contains($0) ? $0 : nil }
         let external = IORegistryEntryCreateCFProperty(service, "ExternalConnected" as CFString, kCFAllocatorDefault, 0)?
             .takeRetainedValue() as? Bool ?? false
-        return BatteryState(percent: percent, temperature: temperature, externalConnected: external)
+        let charging = IORegistryEntryCreateCFProperty(service, "IsCharging" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool
+        return BatteryState(percent: percent, temperature: temperature, externalConnected: external, charging: charging)
+    }
+
+    /// Disconnecting the adapter with the lid closed makes the Mac sleep at once, so the
+    /// helper never does it then. An unreadable state counts as closed.
+    public static func lidClosed() -> Bool {
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard root != 0 else { return true }
+        defer { IOObjectRelease(root) }
+        return IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool ?? true
+    }
+}
+
+/// Firmware can store a charging key and ignore it, so a readback alone doesn't prove a pause works.
+/// This flags a method once the battery has kept charging through a whole grace period while paused.
+public struct PauseCheck: Sendable {
+    public static let grace = 30.0
+    private var since: Double?
+    public init() {}
+
+    public mutating func ineffective(paused: Bool, charging: Bool?, now: Double) -> Bool {
+        // An unreadable state is not evidence of failure.
+        guard paused, charging == true else { since = nil; return false }
+        let start = since ?? now
+        since = start
+        return now - start >= Self.grace
     }
 }
 

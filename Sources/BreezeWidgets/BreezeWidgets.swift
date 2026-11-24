@@ -33,7 +33,9 @@ struct BreezeProvider: TimelineProvider {
 struct BreezeStatusWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "BreezeStatus", provider: BreezeProvider()) { entry in
-            BreezeWidgetEntryView(entry: entry).containerBackground(.fill.tertiary, for: .widget)
+            // Opaque on purpose: macOS swaps it for Liquid Glass in the Clear/Tinted widget styles;
+            // a translucent fill here turns into a pale plate that hides the white text.
+            BreezeWidgetEntryView(entry: entry).containerBackground(.background, for: .widget)
         }
         .configurationDisplayName("Breeze")
         .description("Temperature, fans and your Mac’s vital signs.")

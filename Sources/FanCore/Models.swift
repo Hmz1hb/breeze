@@ -76,14 +76,18 @@ public struct Reply: Codable, Sendable {
     public let charging: String?
     public let chargingPaused: Bool?
     public let toppingUp: Bool?
+    /// Why the MagSafe light override isn't applied; nil when it is, or none was requested.
+    public let magSafeLED: String?
     /// IOReport CPU energy, which recent macOS shares only with privileged readers.
     public let power: PrivilegedPower?
     public init(ok: Bool, message: String, manual: Bool, percent: Double? = nil,
                 boosted: Bool = false, suspended: Bool = false, mode: CoolingMode = .automatic,
-                charging: String? = nil, chargingPaused: Bool? = nil, toppingUp: Bool? = nil, power: PrivilegedPower? = nil) {
+                charging: String? = nil, chargingPaused: Bool? = nil, toppingUp: Bool? = nil, power: PrivilegedPower? = nil,
+                magSafeLED: String? = nil) {
         self.ok = ok; self.message = message; self.manual = manual
         self.percent = percent; self.boosted = boosted; self.suspended = suspended; self.mode = mode
         self.charging = charging; self.chargingPaused = chargingPaused; self.toppingUp = toppingUp; self.power = power
+        self.magSafeLED = magSafeLED
     }
 }
 

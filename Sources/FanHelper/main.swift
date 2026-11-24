@@ -81,6 +81,7 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                 usleep(200_000)
             }
         }
+        do { try smc.restoreMagSafeLED() } catch { report("Returning the MagSafe light to macOS: \(error.localizedDescription)") }
     }
     let sleepWatcher = SleepWatcher()
     defer { sleepWatcher?.close() }
@@ -109,20 +110,73 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     }
     var charger: ChargeController?
     var chargeStatus: String?
+    // Without direct charge control, hold the limit by disconnecting the adapter (batt's adapter mode).
+    var holdWithAdapter = !smc.canInhibitCharging && smc.adapterControl != nil
+    var pauseCheck = PauseCheck()
     var lastCharge = 0.0
+    var magSafeLED: MagSafeLED?
+    var magSafeStatus: String?
+    var lastMagSafe = 0.0
+
+    // macOS can reset the light on replug, so a working override is re-asserted; a failed one waits for the next command.
+    func applyMagSafeLED(force: Bool = false) {
+        let now = breeze_continuous_time()
+        guard force || now - lastMagSafe >= 5 else { return }
+        lastMagSafe = now
+        if magSafeLED == nil, !smc.magSafeLEDOverridden { magSafeStatus = nil; return }
+        let wanted = magSafeLED?.rawValue ?? 0
+        guard force || (magSafeStatus == nil && smc.magSafeLED != wanted) else { return }
+        do { try smc.setMagSafeLED(wanted); magSafeStatus = nil }
+        catch { magSafeStatus = error.localizedDescription }
+    }
 
     func applyCharging(force: Bool = false) {
         guard var active = charger else { return }
         let now = breeze_continuous_time()
         guard force || now - lastCharge >= 5 else { return }
         lastCharge = now
-        let decision = active.next(BatteryState.read())
+        let battery = BatteryState.read()
+        let paused = holdWithAdapter ? smc.adapterDisabled : smc.chargingInhibited
+        if pauseCheck.ineffective(paused: paused, charging: battery?.charging, now: now) {
+            pauseCheck = PauseCheck()
+            if !holdWithAdapter, smc.adapterControl != nil {
+                // Pausing was accepted but ignored: fall back to disconnecting the adapter.
+                do {
+                    try smc.restoreCharging()
+                    holdWithAdapter = true
+                    lastCharge = 0
+                    chargeStatus = "Pausing charging had no effect on this Mac, so Breeze now holds the limit by disconnecting the adapter."
+                } catch {
+                    charger = nil
+                    try? smc.restoreAdapter()
+                    chargeStatus = "Pausing charging had no effect, and re-enabling it failed: \(error.localizedDescription)"
+                }
+            } else {
+                charger = nil
+                try? smc.restoreAdapter()
+                try? smc.restoreCharging()
+                chargeStatus = "This Mac’s firmware accepted the charge limit but kept charging, so the limit is off and macOS manages charging."
+            }
+            report(chargeStatus ?? "")
+            return
+        }
+        let decision = active.next(battery)
         charger = active
         do {
+            if holdWithAdapter {
+                let hold = !(decision.allow && decision.adapter)
+                let lidClosed = hold && BatteryState.lidClosed()
+                let connect = !hold || lidClosed
+                if connect == smc.adapterDisabled { try smc.setAdapter(enabled: connect) }
+                chargeStatus = decision.message + (lidClosed ? " The lid is closed, so the adapter stays connected and the battery may charge."
+                    : hold ? " The adapter is disconnected, so the Mac runs on its battery." : "")
+                return
+            }
             if decision.allow == smc.chargingInhibited { try smc.setCharging(allowed: decision.allow) }
             chargeStatus = decision.message
-            if decision.adapter == smc.adapterDisabled {
-                do { try smc.setAdapter(enabled: decision.adapter) }
+            let connect = decision.adapter || BatteryState.lidClosed()
+            if connect == smc.adapterDisabled {
+                do { try smc.setAdapter(enabled: connect) }
                 catch {
                     // Unsupported or rejected adapter control ends discharge only; limiting continues.
                     active.stopDischarge()
@@ -171,19 +225,21 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
     func reply() -> Reply {
         Reply(ok: healthy, message: status, manual: smc.hasOverrides, percent: applied,
               boosted: boosted, suspended: suspended, mode: configuration.mode,
-              charging: chargeStatus, chargingPaused: smc.chargingInhibited,
-              toppingUp: charger.map(\.isToppingUp), power: power)
+              charging: chargeStatus, chargingPaused: smc.chargingInhibited || smc.adapterDisabled,
+              toppingUp: charger.map(\.isToppingUp), power: power,
+              magSafeLED: magSafeStatus)
     }
 
     while true {
         sleepWatcher?.handlePending {
             // With the adapter disconnected the Mac would drain overnight; reconnect it first.
             do { try smc.restoreAdapter() } catch { report("Reconnecting the adapter before sleep: \(error.localizedDescription)") }
-            if charger?.configuration.pauseDuringSleep == true, !smc.chargingInhibited {
+            if charger?.configuration.pauseDuringSleep == true, !holdWithAdapter, !smc.chargingInhibited {
                 do { try smc.setCharging(allowed: false); chargeStatus = "Charging paused for sleep." }
                 catch { report("Pausing charging before sleep: \(error.localizedDescription)") }
             }
             lastCharge = 0 // Re-decide right after wake.
+            pauseCheck = PauseCheck() // Time asleep isn't time spent charging while paused.
         }
         // One owner controls the hardware. Reject additional clients promptly.
         let waiting = breeze_accept(listener, 0)
@@ -202,6 +258,8 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                 switch command.action {
                 case .heartbeat: break
                 case .charge:
+                    magSafeLED = command.charge?.magSafeLED
+                    applyMagSafeLED(force: true)
                     // Charging errors never disturb an active cooling profile.
                     if let next = command.charge, next.isActive {
                         if let valid = try? ChargeController(configuration: next) {
@@ -250,6 +308,7 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
                 try applyController()
             } catch { fail(error) }
             applyCharging()
+            applyMagSafeLED()
             samplePower()
             try Wire.send(reply(), to: fd)
             last = breeze_continuous_time()
@@ -258,6 +317,7 @@ func serve(_ fd: Int32, parent: pid_t, listener: Int32) throws {
             do { try applyController() }
             catch { fail(error) }
             applyCharging()
+            applyMagSafeLED()
             samplePower()
         }
     }
@@ -269,9 +329,10 @@ func run() throws {
     if args.count == 2 && args[1] == "--status" {
         let smc = try SMC()
         print(String(decoding: try JSONEncoder().encode(smc.snapshot()), as: UTF8.self))
-        // Read-only: shows which charging and adapter keys this Mac's firmware exposes.
+        // Read-only: shows which charging and adapter keys this Mac's firmware lets Breeze read.
+        let method = smc.canInhibitCharging ? "pause charging" : smc.adapterControl != nil ? "disconnect adapter" : "unsupported"
         let keys = try JSONSerialization.data(withJSONObject: ["chargingKeys": smc.chargingKeys(),
-            "adapterControl": smc.adapterControl?.key ?? "unsupported"], options: [.sortedKeys])
+            "adapterControl": smc.adapterControl?.key ?? "unsupported", "chargeLimitMethod": method], options: [.sortedKeys])
         print(String(decoding: keys, as: UTF8.self))
         return
     }

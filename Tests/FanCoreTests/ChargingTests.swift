@@ -57,3 +57,17 @@ private func battery(_ percent: Double?, temperature: Double? = 30) -> BatterySt
     let decoded = try JSONDecoder().decode(ChargeConfiguration.self, from: legacy)
     #expect(decoded.enabled && decoded.discharge == nil && decoded.topUp == nil && decoded.pauseDuringSleep == nil)
 }
+
+@Test func pauseCheckFlagsOnlyChargingThatOutlastsTheGracePeriod() {
+    var check = PauseCheck()
+    let grace = PauseCheck.grace
+    // Restarts on a non-charging or unreadable reading; flags only a full grace period of charging.
+    let readings: [(Bool?, Double)] = [(true, 0), (true, grace - 1), (false, grace), (true, 100),
+                                       (nil, 110), (true, 120), (true, 120 + grace)]
+    let flags = readings.map { check.ineffective(paused: true, charging: $0.0, now: $0.1) }
+    #expect(flags == [false, false, false, false, false, false, true])
+    // Charging while not paused is expected.
+    var idle = PauseCheck()
+    let idleFlags = [0.0, 1000].map { idle.ineffective(paused: false, charging: true, now: $0) }
+    #expect(idleFlags == [false, false])
+}

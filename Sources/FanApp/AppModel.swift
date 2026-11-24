@@ -39,6 +39,8 @@ final class AppModel {
         }
     }
     var chargeStatus: String?
+    /// Helper's reason the MagSafe light override isn't applied.
+    var magSafeStatus: String?
     var chargingPaused = false
     var automationEnabled: Bool {
         didSet {
@@ -256,7 +258,7 @@ final class AppModel {
             }
         }
         if applyAtLaunch { Task { await apply() } }
-        else if charge.isActive { Task { await applyCharge() } }
+        else if charge.needsHelper { Task { await applyCharge() } }
     }
     func enable() async {
         guard !busy else { return }
@@ -277,7 +279,7 @@ final class AppModel {
         enabled = true
         consume(reply)
         // Each new helper session starts with charging under macOS control.
-        if charge.isActive { consume(try await session.request(Command(.charge, charge: charge))) }
+        if charge.needsHelper { consume(try await session.request(Command(.charge, charge: charge))) }
     }
     /// Charge to 100% once, then return to the limit when unplugged.
     func topUp(_ on: Bool) async {
@@ -293,7 +295,7 @@ final class AppModel {
         do {
             try charge.validate()
             if !enabled {
-                guard charge.isActive else { chargeStatus = nil; chargingPaused = false; return }
+                guard charge.needsHelper else { chargeStatus = nil; chargingPaused = false; return }
                 try await connect() // connect() sends the charge configuration.
                 return
             }
@@ -360,6 +362,7 @@ final class AppModel {
     }
     private func consume(_ reply: Reply) {
         chargeStatus = reply.charging
+        magSafeStatus = reply.magSafeLED
         chargingPaused = reply.chargingPaused ?? false
         // The helper ends a top up once the adapter is unplugged.
         if charge.topUp == true, reply.toppingUp == false { charge.topUp = nil }
@@ -375,7 +378,7 @@ final class AppModel {
         if boostEndsAt != nil { appliedConfiguration = nil }
         boostEndsAt = nil
         enabled = false; manual = false; appliedPercent = nil; boosted = false; activeMode = .automatic
-        chargeStatus = nil; chargingPaused = false
+        chargeStatus = nil; chargingPaused = false; magSafeStatus = nil
         message = error.localizedDescription
         controllerMessage = "Control connection lost. Check the live fan modes below."
     }
@@ -435,7 +438,7 @@ final class AppModel {
         boostEndsAt = nil
         await session.stop()
         enabled = false; manual = false; appliedPercent = nil; activeMode = .automatic; boosted = false
-        chargeStatus = nil; chargingPaused = false
+        chargeStatus = nil; chargingPaused = false; magSafeStatus = nil
     }
     func quit() async {
         loop?.cancel()

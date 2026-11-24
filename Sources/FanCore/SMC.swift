@@ -194,6 +194,12 @@ public final class SMC {
 
     public private(set) var adapterDisabled = false
 
+    /// Whether charging can be paused directly. macOS 27-era firmware gates these keys
+    /// (and bfF0/bfD0/bfE0) behind an Apple entitlement; only the adapter key stays open.
+    public var canInhibitCharging: Bool {
+        (try? raw("CHTE"))?.1.count == 4 || (try? raw("CH0B"))?.1.count == 1
+    }
+
     /// CHIE (1 byte, 0x08 disconnects) on current firmware, CH0I (1 byte, 0x01) on earlier firmware.
     /// CH0J is deliberately unsupported: open-source tools disagree on its value.
     public var adapterControl: (key: String, off: UInt8)? {
@@ -220,10 +226,34 @@ public final class SMC {
         try setAdapter(enabled: true)
     }
 
+    public private(set) var magSafeLEDOverridden = false
+
+    /// MagSafe 3 Macs expose ACLC (1 byte). Other Macs and gated firmware don't.
+    public var magSafeLED: UInt8? {
+        guard let (_, bytes) = try? raw("ACLC"), bytes.count == 1 else { return nil }
+        return bytes[0]
+    }
+
+    /// 0 returns the light to macOS; see `MagSafeLED` for the others.
+    public func setMagSafeLED(_ value: UInt8) throws {
+        guard magSafeLED != nil else { throw FanError("This Mac doesn’t expose a MagSafe light control.") }
+        if value != 0 { magSafeLEDOverridden = true } // Include partial writes in restoration.
+        try WriteVerification.apply(attempts: 3, write: {
+            let result = breeze_smc_write(self.connection, "ACLC", 1, [value])
+            guard result == 0 else { throw FanError("AppleSMC rejected ACLC (\(result)).") }
+        }, matches: { self.magSafeLED == value }, pause: { usleep(100_000) })
+        magSafeLEDOverridden = value != 0
+    }
+
+    public func restoreMagSafeLED() throws {
+        guard magSafeLEDOverridden else { return }
+        try setMagSafeLED(0)
+    }
+
     /// Read-only probe for `--status`: which charging keys exist and their sizes in bytes.
     public func chargingKeys() -> [String: Int] {
         var keys: [String: Int] = [:]
-        for key in ["CHTE", "CH0B", "CH0C", "CHIE", "CH0I", "CH0J"] {
+        for key in ["CHTE", "CH0B", "CH0C", "CHIE", "CH0I", "CH0J", "bfF0", "bfD0", "bfE0", "ACLC"] {
             if let (_, bytes) = try? raw(key) { keys[key] = bytes.count }
         }
         return keys
